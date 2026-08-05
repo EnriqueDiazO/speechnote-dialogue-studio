@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "speechnote-dialogue-studio"
+version = "0.1.0"
+description = "A local multi-speaker dialogue studio for Speech Note"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["streamlit==1.59.2"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<9", "ruff>=0.12,<1"]
+
+[tool.setuptools.packages.find]
+include = ["dialogue_studio*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
