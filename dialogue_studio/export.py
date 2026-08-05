@@ -79,7 +79,8 @@ def render_script_markdown(project: DialogueProject) -> str:
 
 def render_export_readme(project: DialogueProject) -> str:
     voices = "\n".join(
-        f"- {speaker.name}: {speaker.model_label or speaker.model_id} ({speaker.model_id})"
+        f"- {speaker.name}: {speaker.tts_config.voice_label or speaker.tts_config.voice_id} "
+        f"({speaker.tts_config.provider})"
         for speaker in project.speakers
     )
     return (
@@ -91,7 +92,8 @@ def render_export_readme(project: DialogueProject) -> str:
         "- Audio maestro: WAV PCM 16-bit, 48000 Hz, mono\n\n"
         "## Voces\n\n"
         f"{voices}\n\n"
-        "Los audios se generaron localmente mediante Speech Note. El ZIP no contiene "
+        "Los audios se generaron localmente mediante los proveedores configurados. "
+        "El ZIP no contiene "
         "modelos de voz. Reproduce `audio/dialogue.wav` o, si existe, "
         "`audio/dialogue.mp3`.\n"
     )
@@ -111,6 +113,7 @@ def build_manifest(
         for utterance in project.utterances
         if utterance.utterance_id not in ready_ids
     ]
+    project_data = project.to_dict()
     return {
         "format": "speechnote-dialogue-studio-project",
         "schema_version": project.schema_version,
@@ -119,8 +122,8 @@ def build_manifest(
         "language": project.language,
         "created_at": project.created_at,
         "updated_at": project.updated_at,
-        "speakers": [speaker.__dict__ for speaker in project.speakers],
-        "utterances": [utterance.__dict__ for utterance in project.utterances],
+        "speakers": project_data["speakers"],
+        "utterances": project_data["utterances"],
         "ready_utterance_ids": ready_ids,
         "pending_utterance_ids": pending_ids,
         "pause_ms": project.pause_ms,

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID, uuid4
 
 SCHEMA_VERSION = 1
@@ -13,6 +13,109 @@ UTTERANCE_STATES = {"draft", "generating", "ready", "error", "stale"}
 RECOVERABLE_SYNTHESIS_MESSAGE = (
     "La síntesis anterior no terminó. Puedes editar o regenerar esta intervención."
 )
+TTSProvider = Literal["speechnote", "qwen"]
+TTS_PROVIDERS = {"speechnote", "qwen"}
+
+
+@dataclass
+class SpeakerTTSConfig:
+    """Durable provider settings for one character.
+
+    ``instruction_text`` is reserved for future models that advertise ``supports_instruct``.
+    It remains absent from serialized 0.6B configurations when unset.
+    """
+
+    provider: TTSProvider = "speechnote"
+    voice_id: str = ""
+    voice_label: str = ""
+    language: str = "auto"
+    generation_options: dict[str, int | float] = field(default_factory=dict)
+    instruction_text: str | None = None
+
+    @classmethod
+    def from_dict(
+        cls,
+        data: dict[str, Any] | None,
+        *,
+        legacy_voice_id: str = "",
+        legacy_voice_label: str = "",
+    ) -> SpeakerTTSConfig:
+        if not isinstance(data, dict):
+            return cls(
+                provider="speechnote",
+                voice_id=legacy_voice_id,
+                voice_label=legacy_voice_label,
+            )
+        return cls(
+            provider=str(data.get("provider", "speechnote")),  # type: ignore[arg-type]
+            voice_id=str(data.get("voice_id", legacy_voice_id)),
+            voice_label=str(data.get("voice_label", legacy_voice_label)),
+            language=str(data.get("language", "auto")),
+            generation_options=dict(data.get("generation_options", {})),
+            instruction_text=(
+                str(data["instruction_text"]) if data.get("instruction_text") else None
+            ),
+        )
+
+    def validate(self) -> None:
+        if self.provider not in TTS_PROVIDERS:
+            raise ValueError(f"Proveedor TTS desconocido: {self.provider}")
+        if not self.language.strip():
+            raise ValueError("La configuración TTS necesita un idioma")
+        for name, value in self.generation_options.items():
+            if not isinstance(name, str) or isinstance(value, bool) or not isinstance(
+                value, (int, float)
+            ):
+                raise ValueError("Las opciones TTS deben ser valores numéricos")
+
+
+@dataclass
+class UtteranceTTSOverride:
+    provider: TTSProvider | None = None
+    voice_id: str | None = None
+    language: str | None = None
+    generation_options: dict[str, int | float] = field(default_factory=dict)
+    instruction_text: str | None = None
+
+    @classmethod
+    def from_dict(cls, data: object) -> UtteranceTTSOverride | None:
+        if not isinstance(data, dict):
+            return None
+        override = cls(
+            provider=(str(data["provider"]) if data.get("provider") else None),  # type: ignore[arg-type]
+            voice_id=(str(data["voice_id"]) if data.get("voice_id") else None),
+            language=(str(data["language"]) if data.get("language") else None),
+            generation_options=dict(data.get("generation_options", {})),
+            instruction_text=(
+                str(data["instruction_text"]) if data.get("instruction_text") else None
+            ),
+        )
+        return None if override.is_empty else override
+
+    @property
+    def is_empty(self) -> bool:
+        return not any(
+            (
+                self.provider,
+                self.voice_id,
+                self.language,
+                self.generation_options,
+                self.instruction_text,
+            )
+        )
+
+    def validate(self) -> None:
+        if self.provider is not None and self.provider not in TTS_PROVIDERS:
+            raise ValueError(f"Proveedor TTS desconocido: {self.provider}")
+        if self.voice_id is not None and not self.voice_id.strip():
+            raise ValueError("El override de voz no puede estar vacío")
+        if self.language is not None and not self.language.strip():
+            raise ValueError("El override de idioma no puede estar vacío")
+        for name, value in self.generation_options.items():
+            if not isinstance(name, str) or isinstance(value, bool) or not isinstance(
+                value, (int, float)
+            ):
+                raise ValueError("Las opciones TTS deben ser valores numéricos")
 
 
 def utc_now() -> str:
@@ -46,6 +149,7 @@ class SpeakerProfile:
     model_label: str
     color_key: str = "accent"
     enabled: bool = True
+    tts: SpeakerTTSConfig | None = None
 
     @classmethod
     def create(
@@ -54,13 +158,49 @@ class SpeakerProfile:
         model_id: str = "",
         model_label: str = "",
         color_key: str = "accent",
+        *,
+        tts: SpeakerTTSConfig | None = None,
     ) -> SpeakerProfile:
-        return cls(new_id(), name.strip(), model_id, model_label, color_key, True)
+        config = tts or SpeakerTTSConfig(
+            provider="speechnote",
+            voice_id=model_id,
+            voice_label=model_label,
+        )
+        return cls(new_id(), name.strip(), model_id, model_label, color_key, True, config)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SpeakerProfile:
+        model_id = str(data.get("model_id", ""))
+        model_label = str(data.get("model_label", ""))
+        return cls(
+            speaker_id=str(data["speaker_id"]),
+            name=str(data.get("name", "")),
+            model_id=model_id,
+            model_label=model_label,
+            color_key=str(data.get("color_key", "accent")),
+            enabled=bool(data.get("enabled", True)),
+            tts=SpeakerTTSConfig.from_dict(
+                data.get("tts"),
+                legacy_voice_id=model_id,
+                legacy_voice_label=model_label,
+            ),
+        )
+
+    @property
+    def tts_config(self) -> SpeakerTTSConfig:
+        if self.tts is None:
+            self.tts = SpeakerTTSConfig(
+                provider="speechnote",
+                voice_id=self.model_id,
+                voice_label=self.model_label,
+            )
+        return self.tts
 
     def validate(self) -> None:
         _valid_uuid(self.speaker_id, "speaker_id")
         if not self.name.strip():
             raise ValueError("Cada hablante necesita un nombre")
+        self.tts_config.validate()
 
 
 @dataclass
@@ -76,10 +216,19 @@ class Utterance:
     error_message: str | None = None
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
+    tts_override: UtteranceTTSOverride | None = None
+    audio_fingerprint: str | None = None
 
     @classmethod
     def create(cls, order: int, speaker_id: str, text: str = "") -> Utterance:
         return cls(new_id(), order, speaker_id, text)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Utterance:
+        fields = set(cls.__dataclass_fields__)
+        values = {key: value for key, value in data.items() if key in fields}
+        values["tts_override"] = UtteranceTTSOverride.from_dict(data.get("tts_override"))
+        return cls(**values)
 
     def validate(self) -> None:
         _valid_uuid(self.utterance_id, "utterance_id")
@@ -91,6 +240,8 @@ class Utterance:
         if self.duration_seconds is not None and self.duration_seconds < 0:
             raise ValueError("La duración no puede ser negativa")
         validate_relative_path(self.audio_relative_path)
+        if self.tts_override is not None:
+            self.tts_override.validate()
 
     def mark_stale(self) -> None:
         if self.audio_relative_path or self.status == "ready":
@@ -175,16 +326,8 @@ class DialogueProject:
                 "El proyecto usa schema_version "
                 f"{version}; esta versión admite hasta {SCHEMA_VERSION}"
             )
-        speaker_fields = set(SpeakerProfile.__dataclass_fields__)
-        utterance_fields = set(Utterance.__dataclass_fields__)
-        speakers = [
-            SpeakerProfile(**{key: value for key, value in item.items() if key in speaker_fields})
-            for item in data.get("speakers", [])
-        ]
-        utterances = [
-            Utterance(**{key: value for key, value in item.items() if key in utterance_fields})
-            for item in data.get("utterances", [])
-        ]
+        speakers = [SpeakerProfile.from_dict(item) for item in data.get("speakers", [])]
+        utterances = [Utterance.from_dict(item) for item in data.get("utterances", [])]
         project = cls(
             schema_version=version,
             project_id=data["project_id"],
@@ -201,7 +344,24 @@ class DialogueProject:
         return project
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        data = asdict(self)
+        for speaker in data["speakers"]:
+            tts = speaker.get("tts")
+            if isinstance(tts, dict) and tts.get("instruction_text") is None:
+                tts.pop("instruction_text", None)
+        for utterance in data["utterances"]:
+            override = utterance.get("tts_override")
+            if override is None:
+                utterance.pop("tts_override", None)
+            elif isinstance(override, dict):
+                for key in ("provider", "voice_id", "language", "instruction_text"):
+                    if override.get(key) is None:
+                        override.pop(key, None)
+                if not override.get("generation_options"):
+                    override.pop("generation_options", None)
+            if utterance.get("audio_fingerprint") is None:
+                utterance.pop("audio_fingerprint", None)
+        return data
 
     def touch(self) -> None:
         self.updated_at = utc_now()
@@ -237,3 +397,38 @@ class DialogueProject:
                 raise ValueError("Una intervención referencia un hablante inexistente")
         if require_utterance and not self.utterances:
             raise ValueError("Se necesita al menos una intervención para exportar")
+
+
+def effective_tts_config(
+    project: DialogueProject, utterance: Utterance
+) -> SpeakerTTSConfig:
+    """Resolve a durable character configuration plus an optional utterance override."""
+    base = project.speaker(utterance.speaker_id).tts_config
+    override = utterance.tts_override
+    if override is None:
+        return SpeakerTTSConfig(
+            provider=base.provider,
+            voice_id=base.voice_id,
+            voice_label=base.voice_label,
+            language=base.language,
+            generation_options=dict(base.generation_options),
+            instruction_text=base.instruction_text,
+        )
+    options = dict(base.generation_options)
+    options.update(override.generation_options)
+    return SpeakerTTSConfig(
+        provider=override.provider or base.provider,
+        voice_id=override.voice_id or base.voice_id,
+        voice_label=(
+            override.voice_id.replace("_", " ").title()
+            if override.voice_id
+            else base.voice_label
+        ),
+        language=override.language or base.language,
+        generation_options=options,
+        instruction_text=(
+            override.instruction_text
+            if override.instruction_text is not None
+            else base.instruction_text
+        ),
+    )

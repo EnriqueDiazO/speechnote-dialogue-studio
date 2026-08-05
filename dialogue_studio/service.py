@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
@@ -14,7 +16,10 @@ from .models import (
     RECOVERABLE_SYNTHESIS_MESSAGE,
     DialogueProject,
     SpeakerProfile,
+    SpeakerTTSConfig,
     Utterance,
+    UtteranceTTSOverride,
+    effective_tts_config,
     utc_now,
 )
 from .paths import safe_write_path
@@ -57,10 +62,89 @@ def update_speaker_voice(
         return
     speaker.model_id = model_id
     speaker.model_label = model_label
+    speaker.tts = SpeakerTTSConfig(
+        provider="speechnote",
+        voice_id=model_id,
+        voice_label=model_label,
+        language="auto",
+    )
     for utterance in project.utterances:
         if utterance.speaker_id == speaker_id:
             utterance.mark_stale()
     project.touch()
+
+
+def update_speaker_tts(
+    project: DialogueProject,
+    speaker_id: str,
+    config: SpeakerTTSConfig,
+) -> None:
+    config.validate()
+    speaker = project.speaker(speaker_id)
+    if speaker.tts_config == config:
+        return
+    speaker.tts = deepcopy(config)
+    # Keep legacy fields useful to older readers without treating them as provider state.
+    speaker.model_id = config.voice_id
+    speaker.model_label = config.voice_label
+    for utterance in project.utterances:
+        if utterance.speaker_id == speaker_id:
+            utterance.mark_stale()
+    project.touch()
+
+
+def update_speaker_name(project: DialogueProject, speaker_id: str, name: str) -> None:
+    clean = name.strip()
+    if not clean:
+        raise ValueError("Cada hablante necesita un nombre")
+    speaker = project.speaker(speaker_id)
+    if speaker.name == clean:
+        return
+    speaker.name = clean
+    for utterance in project.utterances:
+        if utterance.speaker_id == speaker_id:
+            utterance.mark_stale()
+    project.touch()
+
+
+def update_utterance_tts_override(
+    project: DialogueProject,
+    utterance_id: str,
+    override: UtteranceTTSOverride | None,
+) -> None:
+    if override is not None:
+        override.validate()
+        if override.is_empty:
+            override = None
+    utterance = next(item for item in project.utterances if item.utterance_id == utterance_id)
+    if utterance.tts_override == override:
+        return
+    utterance.tts_override = deepcopy(override)
+    utterance.mark_stale()
+    project.touch()
+
+
+def audio_input_fingerprint(project: DialogueProject, utterance: Utterance) -> str:
+    speaker = project.speaker(utterance.speaker_id)
+    config = effective_tts_config(project, utterance)
+    provider_model = (
+        "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+        if config.provider == "qwen"
+        else "net.mkiol.SpeechNote"
+    )
+    payload = {
+        "text": utterance.text,
+        "speaker_id": speaker.speaker_id,
+        "speaker_name": speaker.name,
+        "provider": config.provider,
+        "provider_model": provider_model,
+        "voice_id": config.voice_id,
+        "language": config.language,
+        "instruction_text": config.instruction_text,
+        "generation_options": config.generation_options,
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def add_speaker(
@@ -69,8 +153,10 @@ def add_speaker(
     model_id: str = "",
     model_label: str = "",
     color_key: str = "accent",
+    *,
+    tts: SpeakerTTSConfig | None = None,
 ) -> SpeakerProfile:
-    speaker = SpeakerProfile.create(name, model_id, model_label, color_key)
+    speaker = SpeakerProfile.create(name, model_id, model_label, color_key, tts=tts)
     project.speakers.append(speaker)
     project.touch()
     return speaker
@@ -125,6 +211,7 @@ def duplicate_utterance(project: DialogueProject, utterance_id: str) -> Utteranc
     duplicate.audio_relative_path = None
     duplicate.duration_seconds = None
     duplicate.sha256 = None
+    duplicate.audio_fingerprint = None
     duplicate.status = "draft"
     duplicate.error_message = None
     duplicate.created_at = utc_now()
@@ -199,6 +286,7 @@ def generate_utterance(
     utterance.audio_relative_path = paths.normalized.relative_to(project_dir).as_posix()
     utterance.duration_seconds = info.duration_seconds
     utterance.sha256 = sha256_file(paths.normalized)
+    utterance.audio_fingerprint = audio_input_fingerprint(project, utterance)
     utterance.status = "ready"
     utterance.error_message = None
     utterance.updated_at = utc_now()

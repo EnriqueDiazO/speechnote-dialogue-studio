@@ -29,6 +29,7 @@ from .service import (
     prepare_generation_paths,
     project_metrics,
     remove_speaker,
+    update_speaker_name,
     update_speaker_voice,
     update_utterance,
 )
@@ -549,8 +550,8 @@ def _render_speakers(
                 disabled=not capabilities.can_edit_project,
             )
             if name.strip() and name != speaker.name:
-                speaker.name = name.strip()
-                project.touch()
+                update_speaker_name(project, speaker.speaker_id, name)
+                _reset_artifacts()
             if options:
                 current_index = (
                     options.index(speaker.model_id) if speaker.model_id in options else 0
