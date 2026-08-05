@@ -299,16 +299,21 @@ class QwenBackendManager:
             )
             repository = Path(__file__).resolve().parents[1]
             with self.log_file.open("ab", buffering=0) as log:
-                self._popen(
-                    [str(self.config.python), "-m", "dialogue_studio.qwen_service"],
-                    cwd=repository,
-                    env=environment,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log,
-                    stderr=log,
-                    start_new_session=True,
-                    close_fds=True,
-                )
+                try:
+                    self._popen(
+                        [str(self.config.python), "-m", "dialogue_studio.qwen_service"],
+                        cwd=repository,
+                        env=environment,
+                        stdin=subprocess.DEVNULL,
+                        stdout=log,
+                        stderr=log,
+                        start_new_session=True,
+                        close_fds=True,
+                    )
+                except Exception:
+                    lock_path.unlink(missing_ok=True)
+                    raise
+        lock_path.unlink(missing_ok=True)
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
             status = self.status()

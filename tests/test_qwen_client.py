@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from dialogue_studio.qwen_client import QwenClient, QwenClientConfig, QwenClientError
+from dialogue_studio.paths import AppPaths
+from dialogue_studio.qwen_client import (
+    QwenBackendManager,
+    QwenClient,
+    QwenClientConfig,
+    QwenClientError,
+)
 
 
 def config(tmp_path: Path) -> QwenClientConfig:
@@ -96,3 +102,24 @@ def test_client_reports_offline_without_leaking_transport_details(
     with pytest.raises(QwenClientError, match="no está disponible") as error:
         QwenClient(config(tmp_path)).health()
     assert error.value.code == "offline"
+
+
+def test_backend_start_removes_temporary_start_lock(monkeypatch, tmp_path: Path) -> None:
+    settings = config(tmp_path)
+    settings.python.write_text("fake", encoding="utf-8")
+    manager = QwenBackendManager(
+        AppPaths(tmp_path / "Music"),
+        settings,
+        popen=lambda *_args, **_kwargs: object(),
+    )
+    states = iter(
+        (
+            {"state": "offline"},
+            {"state": "offline"},
+            {"state": "idle", "service": "speechnote-dialogue-studio-qwen"},
+        )
+    )
+    monkeypatch.setattr(manager, "status", lambda: next(states))
+    result = manager.start(wait_seconds=1)
+    assert result["state"] == "idle"
+    assert not (manager.runtime_dir / "qwen-start.lock").exists()
