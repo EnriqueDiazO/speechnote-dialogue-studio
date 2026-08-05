@@ -142,15 +142,19 @@ def _friendly_error(details: str) -> SpeechNoteError:
 
 
 def _assert_controlled_output(output_path: Path, controlled_root: Path) -> None:
+    lexical_root = controlled_root.absolute()
+    lexical_output = output_path.absolute()
+    if lexical_root != lexical_output and lexical_root not in lexical_output.parents:
+        raise ValueError("La salida debe estar dentro de la carpeta controlada")
+    cursor = lexical_output
+    while cursor != lexical_root:
+        if cursor.is_symlink():
+            raise ValueError("No se permiten enlaces simbólicos como destino")
+        cursor = cursor.parent
     root = controlled_root.resolve()
     output = output_path.resolve(strict=False)
     if root != output and root not in output.parents:
         raise ValueError("La salida debe estar dentro de la carpeta controlada")
-    cursor = output
-    while cursor != root:
-        if cursor.is_symlink():
-            raise ValueError("No se permiten enlaces simbólicos como destino")
-        cursor = cursor.parent
 
 
 def _wave_header_is_valid(path: Path) -> bool:

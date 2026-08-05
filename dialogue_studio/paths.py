@@ -42,13 +42,14 @@ def safe_write_path(root: Path, relative: str | Path) -> Path:
     relative_path = Path(relative)
     if relative_path.is_absolute() or ".." in relative_path.parts:
         raise ValueError("La ruta de destino debe ser relativa y segura")
-    target = _assert_inside(root, root / relative_path)
-    cursor = target
-    while cursor != root.resolve():
+    lexical_root = root.absolute()
+    lexical_target = lexical_root / relative_path
+    cursor = lexical_target
+    while cursor != lexical_root:
         if cursor.is_symlink():
             raise ValueError("No se permiten enlaces simbólicos como destino")
         cursor = cursor.parent
-    return target
+    return _assert_inside(root, lexical_target)
 
 
 @dataclass(frozen=True)
@@ -79,4 +80,3 @@ class AppPaths:
 
     def new_project_dir(self, title: str, project_id: str) -> Path:
         return safe_write_path(self.projects, f"{slugify(title)}-{project_id[:8]}")
-
