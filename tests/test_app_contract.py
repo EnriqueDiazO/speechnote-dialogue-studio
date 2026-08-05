@@ -8,6 +8,7 @@ from streamlit.testing.v1 import AppTest
 import dialogue_studio.ui as ui
 from dialogue_studio.audio import AudioInfo
 from dialogue_studio.paths import AppPaths
+from dialogue_studio.qwen_preview import QwenPreview
 from dialogue_studio.recovery import LEGACY_BUSY_MESSAGE
 from dialogue_studio.speechnote import TTSModel
 from dialogue_studio.synthesis import SynthesisCoordinator
@@ -535,3 +536,35 @@ def test_qwen_sampling_and_utterance_override_persist_and_mark_stale(
     assert utterance.tts_override is not None
     assert utterance.tts_override.provider == "qwen"
     assert utterance.tts_override.voice_id == "vivian"
+
+
+def test_qwen_gallery_preview_assigns_voice_without_changing_utterance_audio(
+    monkeypatch, make_wav, tmp_path: Path
+) -> None:
+    paths = AppPaths(tmp_path / "Music")
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(
+        ui,
+        "system_diagnostics",
+        lambda: _diagnostics(tts_available=True, qwen_available=True),
+    )
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    utterance = app.session_state.project.utterances[0]
+    preview = make_wav(paths.temporary / "qwen-previews" / "preview.wav", rate=24_000)
+    app.session_state.qwen_gallery_records = [
+        QwenPreview(
+            fingerprint="abc123",
+            voice_id="vivian",
+            language="spanish",
+            path=preview,
+            duration_seconds=0.1,
+            elapsed_seconds=1.2,
+            cached=False,
+        )
+    ]
+    app.run()
+    _keyed(app.button, "qwen-preview-assign-abc123").click().run()
+    speaker = app.session_state.project.speakers[0]
+    assert speaker.tts_config.provider == "qwen"
+    assert speaker.tts_config.voice_id == "vivian"
+    assert utterance.audio_relative_path is None

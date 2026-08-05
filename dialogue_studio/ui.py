@@ -21,6 +21,7 @@ from .models import (
 )
 from .paths import AppPaths
 from .qwen_client import QwenBackendManager, QwenClient, QwenClientError
+from .qwen_preview import QwenPreview, clear_qwen_previews, generate_qwen_previews
 from .qwen_service import (
     DEFAULT_GENERATION_OPTIONS,
     DEFAULT_MODEL,
@@ -201,12 +202,18 @@ def _init_state() -> tuple[AppPaths, ProjectStore]:
         st.session_state.external_actions_enabled = None
         st.session_state.session_token = uuid4().hex
         st.session_state.recovery_notice = None
+        st.session_state.qwen_gallery_records = []
+        st.session_state.qwen_gallery_options = dict(DEFAULT_GENERATION_OPTIONS)
     # ``busy`` existed in v0.1 and could survive an interrupted Streamlit run forever.
     # It is not evidence of a real process-local synthesis and is safe to migrate away.
     st.session_state.pop("busy", None)
     st.session_state.pop("active_synthesis_id", None)
     if "session_token" not in st.session_state:
         st.session_state.session_token = uuid4().hex
+    if "qwen_gallery_records" not in st.session_state:
+        st.session_state.qwen_gallery_records = []
+    if "qwen_gallery_options" not in st.session_state:
+        st.session_state.qwen_gallery_options = dict(DEFAULT_GENERATION_OPTIONS)
     GLOBAL_SYNTHESIS_COORDINATOR.clear_abandoned()
     return paths, store
 
@@ -816,6 +823,26 @@ def _test_voice(paths: AppPaths, speaker: SpeakerProfile) -> None:
     st.toast("Prueba de voz lista")
 
 
+def _queue_speaker_widget_reset(speaker_id: str) -> None:
+    pending = set(st.session_state.get("speaker_widget_resets", []))
+    pending.add(speaker_id)
+    st.session_state.speaker_widget_resets = sorted(pending)
+
+
+def _apply_speaker_widget_resets() -> None:
+    pending = set(st.session_state.pop("speaker_widget_resets", []))
+    for speaker_id in pending:
+        prefixes = (
+            f"speaker-provider-{speaker_id}",
+            f"speaker-voice-{speaker_id}",
+            f"speaker-language-{speaker_id}",
+            f"speaker-qwen-{speaker_id}-",
+        )
+        for key in list(st.session_state):
+            if any(key == prefix or key.startswith(prefix) for prefix in prefixes):
+                st.session_state.pop(key, None)
+
+
 def _render_speakers(
     project: DialogueProject,
     paths: AppPaths,
@@ -824,6 +851,7 @@ def _render_speakers(
 ) -> None:
     st.markdown("## Hablantes")
     st.caption("Cada voz se aplica a todas las intervenciones de ese hablante.")
+    _apply_speaker_widget_resets()
     speech_options, speech_labels = _model_options(project, diagnostics)
     qwen_voices, qwen_languages = _qwen_options(diagnostics)
     for speaker in list(project.speakers):
@@ -1071,6 +1099,148 @@ def _render_speakers(
                     tts=new_tts,
                 )
                 st.rerun()
+
+
+def _render_qwen_gallery(
+    project: DialogueProject,
+    paths: AppPaths,
+    diagnostics: dict[str, object],
+    capabilities: ProjectCapabilities,
+) -> None:
+    qwen_voices, qwen_languages = _qwen_options(diagnostics)
+    with st.expander("Explorar voces Qwen"):
+        st.caption(
+            "Compara voces con el mismo texto. Los previews usan una caché separada y no "
+            "modifican los audios del diálogo."
+        )
+        text = st.text_area(
+            "Texto de prueba Qwen",
+            value="Hola. Esta es una comparación breve de voces en español.",
+            key="qwen-gallery-text",
+            height=90,
+        )
+        language = st.selectbox(
+            "Idioma de la comparativa",
+            qwen_languages,
+            index=qwen_languages.index("spanish") if "spanish" in qwen_languages else 0,
+            format_func=lambda value: QWEN_LANGUAGE_LABELS.get(value, value.title()),
+            key="qwen-gallery-language",
+        )
+        default_voices = [
+            voice for voice in ("serena", "vivian", "ryan") if voice in qwen_voices
+        ]
+        selected_voices = st.multiselect(
+            "Voces para comparar",
+            qwen_voices,
+            default=default_voices,
+            format_func=lambda value: QWEN_VOICE_LABELS.get(value, value),
+            key="qwen-gallery-voices",
+        )
+        gallery_config = SpeakerTTSConfig(
+            provider="qwen",
+            voice_id=selected_voices[0] if selected_voices else qwen_voices[0],
+            language=language,
+            generation_options=dict(st.session_state.qwen_gallery_options),
+        )
+        with st.expander("Opciones de sampling de la comparativa"):
+            options, reset = _sampling_controls(
+                gallery_config,
+                key_prefix="qwen-gallery",
+                disabled=capabilities.has_active_synthesis,
+            )
+        st.session_state.qwen_gallery_options = options
+        actions = st.columns(2)
+        if actions[0].button(
+            "Generar comparativa",
+            type="primary",
+            disabled=(
+                not capabilities.qwen_available
+                or capabilities.has_active_synthesis
+                or not text.strip()
+                or not selected_voices
+            ),
+            use_container_width=True,
+        ):
+            with st.spinner("Generando previews Qwen secuencialmente…"):
+                records = generate_qwen_previews(
+                    paths=paths,
+                    text=text,
+                    voice_ids=list(selected_voices),
+                    language=language,
+                    generation_options=options,
+                    session_token=st.session_state.session_token,
+                    coordinator=GLOBAL_SYNTHESIS_COORDINATOR,
+                    client=QwenClient(),
+                )
+            st.session_state.qwen_gallery_records = records
+            _clear_diagnostics_cache()
+            st.rerun()
+        if actions[1].button(
+            "Limpiar previews",
+            disabled=capabilities.has_active_synthesis,
+            use_container_width=True,
+        ):
+            removed = clear_qwen_previews(paths)
+            st.session_state.qwen_gallery_records = []
+            st.toast(f"Previews eliminados: {removed}")
+            st.rerun()
+        if reset:
+            st.rerun()
+
+        records = st.session_state.qwen_gallery_records
+        speaker_ids = [speaker.speaker_id for speaker in project.speakers]
+        speaker_names = {speaker.speaker_id: speaker.name for speaker in project.speakers}
+        preview_root = (paths.temporary / "qwen-previews").resolve(strict=False)
+        for record in records:
+            if not isinstance(record, QwenPreview):
+                continue
+            with st.container(border=True, key=f"qwen-preview-{record.fingerprint}"):
+                st.markdown(f"### {QWEN_VOICE_LABELS.get(record.voice_id, record.voice_id)}")
+                if record.error:
+                    st.error(record.error)
+                    continue
+                if record.path is None:
+                    st.error("El preview no está disponible")
+                    continue
+                resolved = record.path.resolve(strict=False)
+                if preview_root not in resolved.parents or not resolved.is_file():
+                    st.error("La ruta del preview ya no es válida")
+                    continue
+                st.audio(str(resolved), format="audio/wav")
+                cache_label = " · caché" if record.cached else ""
+                st.caption(
+                    f"Duración · {record.duration_seconds or 0:.2f} s  |  "
+                    f"Generación · {record.elapsed_seconds or 0:.2f} s{cache_label}"
+                )
+                columns = st.columns([2, 1])
+                target = columns[0].selectbox(
+                    "Asignar al personaje",
+                    speaker_ids,
+                    format_func=lambda value: speaker_names[value],
+                    key=f"qwen-preview-target-{record.fingerprint}",
+                )
+                if columns[1].button(
+                    "Asignar esta voz al personaje",
+                    key=f"qwen-preview-assign-{record.fingerprint}",
+                    use_container_width=True,
+                ):
+                    update_speaker_tts(
+                        project,
+                        target,
+                        SpeakerTTSConfig(
+                            provider="qwen",
+                            voice_id=record.voice_id,
+                            voice_label=QWEN_VOICE_LABELS.get(
+                                record.voice_id, record.voice_id
+                            ),
+                            language=record.language,
+                            generation_options=dict(options),
+                        ),
+                    )
+                    _queue_speaker_widget_reset(target)
+                    _reset_artifacts()
+                    st.toast("Voz Qwen asignada")
+                    st.rerun()
 
 
 def _run_generation(
@@ -1524,6 +1694,7 @@ def main() -> None:
     _render_recovery(project, store, capabilities)
     st.divider()
     _render_speakers(project, paths, diagnostics, capabilities)
+    _render_qwen_gallery(project, paths, diagnostics, capabilities)
     st.divider()
     _render_utterances(project, store, paths, diagnostics, capabilities)
     st.divider()
