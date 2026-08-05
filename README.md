@@ -1,9 +1,9 @@
 # SpeechNote Dialogue Studio
 
-Estudio local en Streamlit para escribir diálogos con varios hablantes, asignar una voz
-instalada de Speech Note a cada uno, sintetizar cada intervención y ensamblar un WAV maestro.
-El texto y el audio permanecen en el equipo: la aplicación controla exclusivamente la CLI del
-Flatpak `net.mkiol.SpeechNote` y no incluye un motor TTS propio.
+Estudio local en Streamlit para escribir diálogos con varios hablantes, elegir Speech Note o
+Qwen3-TTS por personaje o intervención, sintetizar y ensamblar un WAV maestro. El texto y el
+audio permanecen en el equipo. Speech Note se controla por la CLI de su Flatpak y Qwen se ejecuta
+en un servicio local aislado que sólo escucha en `127.0.0.1`.
 
 ## Requisitos
 
@@ -11,6 +11,8 @@ Flatpak `net.mkiol.SpeechNote` y no incluye un motor TTS propio.
 - Speech Note instalado como Flatpak y abierto durante la síntesis.
 - En Speech Note: **Ajustes → Permitir aplicaciones externas para invocar acciones**.
 - Al menos una voz TTS descargada en Speech Note.
+- Para Qwen: el entorno separado `/home/enriquedo/PersonalProjects/qwen/.venv-qwen`, CUDA y una
+  GPU compatible con BF16. La aplicación principal no importa Torch ni `qwen_tts`.
 - `ffmpeg` y `ffprobe`; el WAV funciona sin la exportación MP3, pero la normalización necesita
   ambas herramientas si una voz produce un formato distinto del maestro.
 
@@ -39,13 +41,17 @@ make run       # Streamlit en 127.0.0.1:8510
 make test      # pruebas sin invocar Speech Note real
 make lint      # Ruff
 make doctor    # diagnóstico de Flatpak, Speech Note, voces, FFmpeg y Música
+make qwen-status
+make qwen-start
+make qwen-unload  # libera el modelo de VRAM sin detener el servicio
+make qwen-stop
 ```
 
 ## Flujo de trabajo
 
-1. Abre Speech Note y habilita la invocación externa.
+1. Abre Speech Note y habilita la invocación externa, o inicia el backend Qwen desde la UI.
 2. Carga el proyecto de ejemplo o crea un proyecto nuevo.
-3. Ajusta hablantes y voces; añade, edita, duplica o reordena intervenciones.
+3. Elige proveedor, voz e idioma por personaje. Una intervención puede tener un override propio.
 4. Pulsa **Generar** en una tarjeta o **Generar pendientes**. Editar el texto, el hablante o su
    voz marca el audio como desactualizado, pero conserva la toma anterior.
 5. Cuando todas estén listas, pulsa **Construir diálogo**. El master usa PCM de 16 bits,
@@ -53,8 +59,14 @@ make doctor    # diagnóstico de Flatpak, Speech Note, voces, FFmpeg y Música
 6. Escucha el resultado, descarga WAV, crea el MP3 opcional o exporta el proyecto ZIP portable.
 7. Guarda para reabrir el proyecto desde la barra lateral.
 
-No cierres Speech Note mientras una voz está trabajando. Las síntesis se ejecutan de forma
-secuencial; nunca se lanzan dos a la vez.
+No cierres Speech Note mientras una voz Piper está trabajando. Las síntesis se ejecutan de forma
+secuencial; nunca se lanzan dos a la vez, incluso al comparar varias voces Qwen.
+
+El modelo Qwen instalado es `Qwen3-TTS-12Hz-0.6B-CustomVoice`. Permite nueve voces, once idiomas
+y controles de sampling. Aunque la API pública acepta `instruct`, la implementación 0.1.1 fuerza
+ese valor a `None` para el tamaño `0b6`; por eso la UI no muestra emoción, estilo ni instrucciones
+como controles activos. Tampoco anuncia VoiceDesign o clonación. Consulta
+[docs/QWEN_TTS_BACKEND.md](docs/QWEN_TTS_BACKEND.md).
 
 ## Datos locales
 
@@ -68,7 +80,8 @@ La raíz se descubre con `xdg-user-dir MUSIC`, no se asume `~/Music`:
 │   ├── audio/raw/
 │   ├── audio/normalized/
 │   └── exports/
-└── temporary/
+├── temporary/qwen-previews/
+└── runtime/                  # PID, log y lock de arranque del servicio; nunca del proyecto
 ```
 
 Los JSON sólo contienen rutas relativas. El repositorio ignora audio, ZIP, entornos virtuales y
@@ -118,9 +131,9 @@ síntesis interrumpida** sólo cuando exista una inconsistencia. La recuperació
 parciales y locks persistentes sin mostrar el contenido del guion. Funciona aunque Speech Note
 esté cerrado.
 
-## Alcance del MVP
+## Alcance
 
-Incluye edición multi-hablante, persistencia JSON, generación/regeneración individual y por lote,
-reproductores, reordenamiento, normalización, WAV maestro, MP3 y ZIP. Quedan fuera clonación de
-voz, música, efectos, transcripción, diarización, nube, bases de datos, edición de onda, reducción
-de ruido, fórmulas habladas e IA generadora de guiones.
+Incluye edición multi-hablante, dos proveedores combinables, overrides, galería Qwen, persistencia
+JSON, generación/regeneración individual y por lote, reproductores, normalización, WAV maestro,
+MP3 y ZIP. Quedan fuera VoiceDesign, clonación, música, efectos, transcripción, diarización, nube,
+bases de datos, edición de onda, reducción de ruido e IA generadora de guiones.

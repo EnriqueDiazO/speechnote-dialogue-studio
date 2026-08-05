@@ -16,18 +16,33 @@ El objeto raíz contiene:
 - `created_at`, `updated_at`: marcas ISO 8601.
 
 Cada perfil de hablante contiene `speaker_id`, `name`, `model_id`, `model_label`, `color_key` y
-`enabled`. Ningún personaje está fijado en el modelo; Profesor y Estudiante son sólo los perfiles
-iniciales.
+`enabled`. `model_id` y `model_label` se conservan para lectores antiguos. El campo opcional `tts`
+es la configuración vigente:
+
+- `provider`: `speechnote` o `qwen`;
+- `voice_id`, `voice_label`;
+- `language`;
+- `generation_options`: sólo sampling numérico soportado;
+- `instruction_text`: reservado para un modelo futuro que anuncie `supports_instruct`; se omite
+  en la configuración actual 0.6B.
+
+Un proyecto antiguo sin `tts` se interpreta en memoria como `provider: speechnote`, usando
+`model_id` como voz. Abrirlo no reescribe el archivo; los campos nuevos aparecen sólo cuando el
+usuario guarda explícitamente.
 
 Cada intervención contiene `utterance_id`, `order`, `speaker_id`, `text`,
 `audio_relative_path`, `duration_seconds`, `sha256`, `status`, `error_message`, `created_at` y
-`updated_at`. Los estados válidos son `draft`, `generating`, `ready`, `error` y `stale`.
+`updated_at`. Puede contener `tts_override` y `audio_fingerprint`. El override admite proveedor,
+voz, idioma, opciones de sampling e instrucción futura; sólo se guardan sus diferencias duraderas.
+La huella SHA-256 identifica texto, personaje, proveedor, modelo, voz, idioma, instrucción y
+opciones efectivas. Los estados válidos son `draft`, `generating`, `ready`, `error` y `stale`.
 
 `generating` se admite al leer proyectos antiguos, pero representa exclusivamente un instante de
 ejecución. Al guardar, se serializa como `stale` recuperable; identificadores como `busy`,
 `active_synthesis_id`, `generation_in_progress`, tokens de sesión y locks nunca forman parte de
 `project.json`.
 
+Cambiar cualquier entrada de la huella marca el audio `stale` sin borrar su toma anterior.
 `audio_relative_path` siempre usa una ruta POSIX relativa al directorio del proyecto, por ejemplo:
 
 ```text
@@ -38,9 +53,10 @@ No se admiten rutas absolutas, componentes `..`, symlinks ni bytes de audio dent
 
 ## Audio
 
-Los archivos de `audio/raw/` son las salidas inalteradas de Speech Note. Los segmentos de
-`audio/normalized/` usan WAV PCM signed 16-bit little endian, 48000 Hz y un canal. El master se
-construye con `wave` sobre esos segmentos e inserta silencio sólo entre intervenciones.
+Los archivos de `audio/raw/` son las salidas inalteradas del proveedor: Speech Note o Qwen a
+24000 Hz. Los segmentos de `audio/normalized/` usan WAV PCM signed 16-bit little endian, 48000 Hz
+y un canal. El master se construye con `wave` sobre esos segmentos e inserta silencio sólo entre
+intervenciones.
 
 La aplicación conserva tomas anteriores al regenerar y calcula SHA-256 de cada segmento y de los
 exports. El MP3 opcional usa `libmp3lame`, 192 kbps, 48000 Hz y mono.
