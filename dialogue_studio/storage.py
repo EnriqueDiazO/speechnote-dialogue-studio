@@ -101,4 +101,3 @@ class ProjectStore:
                 )
             )
         return sorted(records, key=lambda item: item.updated_at, reverse=True)
-
