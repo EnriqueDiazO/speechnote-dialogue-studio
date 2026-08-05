@@ -15,23 +15,32 @@ def _button(app: AppTest, label: str, occurrence: int = 0):
     return [button for button in app.button if button.label == label][occurrence]
 
 
-def test_app_loads_sample_edits_adds_and_reorders_without_synthesis(
-    monkeypatch, tmp_path: Path
-) -> None:
-    calls = []
-    paths = AppPaths(tmp_path / "Música")
-    diagnostics = {
-        "flatpak": True,
-        "installed": True,
-        "open": True,
+def _keyed(elements, key: str):
+    return next(element for element in elements if element.key == key)
+
+
+def _diagnostics(*, tts_available: bool) -> dict[str, object]:
+    return {
+        "flatpak": tts_available,
+        "installed": tts_available,
+        "open": tts_available,
+        "external_actions_enabled": tts_available,
         "ffmpeg": True,
         "models": [
             TTSModel("es_piper_mx_claude_high", "Profesor"),
             TTSModel("es_piper_es_sharvard_medium_1", "Estudiante"),
         ],
         "active": None,
-        "error": None,
+        "error": None if tts_available else "Speech Note no está disponible",
     }
+
+
+def test_app_loads_sample_edits_adds_and_reorders_without_synthesis(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = []
+    paths = AppPaths(tmp_path / "Música")
+    diagnostics = _diagnostics(tts_available=True)
     monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
     monkeypatch.setattr(ui, "system_diagnostics", lambda: diagnostics)
 
@@ -60,6 +69,8 @@ def test_app_loads_sample_edits_adds_and_reorders_without_synthesis(
     first_text.set_value("Texto editado").run()
     assert app.session_state.project.utterances[0].text == "Texto editado"
     assert calls == []
+    assert not _keyed(app.button, f"generate-{first_id}").disabled
+    assert not _button(app, "Generar pendientes").disabled
 
     _button(app, "↓", 0).click().run()
     assert app.session_state.project.utterances[1].utterance_id == first_id
@@ -72,6 +83,151 @@ def test_app_loads_sample_edits_adds_and_reorders_without_synthesis(
     assert app.session_state.project.utterances[0].status == "ready"
 
 
+def test_editing_remains_available_when_speechnote_is_unavailable(
+    monkeypatch, tmp_path: Path
+) -> None:
+    paths = AppPaths(tmp_path / "Música")
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: _diagnostics(tts_available=False))
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    assert not app.exception
+    utterance = app.session_state.project.utterances[0]
+
+    assert not _button(app, "＋ Añadir intervención").disabled
+    assert not _keyed(app.button, f"duplicate-{utterance.utterance_id}").disabled
+    assert not _keyed(app.button, f"delete-{utterance.utterance_id}").disabled
+    assert _keyed(app.button, f"up-{utterance.utterance_id}").disabled
+    assert _keyed(app.button, f"down-{utterance.utterance_id}").disabled
+    assert not _button(app, "Guardar proyecto").disabled
+    assert not _keyed(app.text_area, f"utterance-text-{utterance.utterance_id}").disabled
+    assert not _keyed(app.selectbox, f"utterance-speaker-{utterance.utterance_id}").disabled
+    assert _keyed(app.button, f"generate-{utterance.utterance_id}").disabled
+    assert not _button(app, "Exportar proyecto ZIP").disabled
+
+    utterance.audio_relative_path = "audio/normalized/previous.wav"
+    utterance.status = "ready"
+    app.run()
+    assert _keyed(app.button, f"generate-{utterance.utterance_id}").label == "Regenerar"
+    assert _keyed(app.button, f"generate-{utterance.utterance_id}").disabled
+
+    _keyed(app.button, f"duplicate-{utterance.utterance_id}").click().run()
+    assert len(app.session_state.project.utterances) == 2
+    duplicate = app.session_state.project.utterances[1]
+    _keyed(app.button, f"delete-{duplicate.utterance_id}").click().run()
+    assert len(app.session_state.project.utterances) == 1
+    _button(app, "＋ Añadir intervención").click().run()
+    assert len(app.session_state.project.utterances) == 2
+
+
+def test_stale_legacy_busy_flag_recovers_without_locking_editing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        ui.AppPaths,
+        "discover",
+        classmethod(lambda cls: AppPaths(tmp_path / "Music")),
+    )
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: _diagnostics(tts_available=False))
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    utterance = app.session_state.project.utterances[0]
+    app.session_state.busy = True
+    app.run()
+    assert not app.exception
+    assert "busy" not in app.session_state.filtered_state
+    assert not _button(app, "＋ Añadir intervención").disabled
+    assert not _keyed(app.button, f"duplicate-{utterance.utterance_id}").disabled
+    assert not _keyed(app.button, f"delete-{utterance.utterance_id}").disabled
+
+
+def test_ready_audio_plays_then_text_edit_marks_it_stale(
+    monkeypatch, make_wav, tmp_path: Path
+) -> None:
+    paths = AppPaths(tmp_path / "Música")
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: _diagnostics(tts_available=True))
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    utterance = app.session_state.project.utterances[0]
+    text_area = _keyed(app.text_area, f"utterance-text-{utterance.utterance_id}")
+    text_area.set_value("Audio vigente").run()
+    _button(app, "Guardar proyecto").click().run()
+    directory = Path(app.session_state.project_dir)
+    relative = f"audio/normalized/{utterance.utterance_id}.wav"
+    make_wav(directory / relative)
+    utterance = app.session_state.project.utterances[0]
+    utterance.audio_relative_path = relative
+    utterance.duration_seconds = 0.1
+    utterance.status = "ready"
+    app.run()
+
+    assert any(expander.label == "Escuchar" for expander in app.expander)
+    assert not _button(app, "Construir diálogo").disabled
+    assert not _keyed(app.button, f"generate-{utterance.utterance_id}").disabled
+    _keyed(app.text_area, f"utterance-text-{utterance.utterance_id}").set_value(
+        "Audio ahora desactualizado"
+    ).run()
+    assert app.session_state.project.utterances[0].status == "stale"
+    assert not _keyed(app.text_area, f"utterance-text-{utterance.utterance_id}").disabled
+    assert not any(expander.label == "Escuchar" for expander in app.expander)
+    assert _button(app, "Construir diálogo").disabled
+    regenerate = _keyed(app.button, f"generate-{utterance.utterance_id}")
+    assert regenerate.label == "Regenerar"
+    assert not regenerate.disabled
+
+
+def test_move_boundaries_and_order_survive_rerun(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        ui.AppPaths,
+        "discover",
+        classmethod(lambda cls: AppPaths(tmp_path / "Music")),
+    )
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: _diagnostics(tts_available=False))
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    _button(app, "Ejemplo").click().run()
+    utterances = list(app.session_state.project.utterances)
+    first, middle, last = utterances
+    assert _keyed(app.button, f"up-{first.utterance_id}").disabled
+    assert not _keyed(app.button, f"down-{first.utterance_id}").disabled
+    assert not _keyed(app.button, f"up-{middle.utterance_id}").disabled
+    assert not _keyed(app.button, f"down-{middle.utterance_id}").disabled
+    assert not _keyed(app.button, f"up-{last.utterance_id}").disabled
+    assert _keyed(app.button, f"down-{last.utterance_id}").disabled
+
+    _keyed(app.button, f"down-{first.utterance_id}").click().run()
+    assert [item.utterance_id for item in app.session_state.project.utterances] == [
+        middle.utterance_id,
+        first.utterance_id,
+        last.utterance_id,
+    ]
+    app.run()
+    assert [item.order for item in app.session_state.project.utterances] == [1, 2, 3]
+
+
+def test_save_and_reopen_preserves_added_utterances(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        ui.AppPaths,
+        "discover",
+        classmethod(lambda cls: AppPaths(tmp_path / "Music")),
+    )
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: _diagnostics(tts_available=False))
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    first = app.session_state.project.utterances[0]
+    _keyed(app.text_area, f"utterance-text-{first.utterance_id}").set_value("Primera").run()
+    _button(app, "＋ Añadir intervención").click().run()
+    second = app.session_state.project.utterances[1]
+    _keyed(app.text_area, f"utterance-text-{second.utterance_id}").set_value("Segunda").run()
+    project_id = app.session_state.project.project_id
+    _button(app, "Guardar proyecto").click().run()
+
+    _button(app, "Nuevo").click().run()
+    assert app.session_state.project.project_id != project_id
+    _button(app, "Abrir seleccionado").click().run()
+    assert app.session_state.project.project_id == project_id
+    assert [item.text for item in app.session_state.project.utterances] == [
+        "Primera",
+        "Segunda",
+    ]
+
+
 def test_session_state_contains_paths_not_audio_bytes(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         ui.AppPaths,
@@ -81,21 +237,33 @@ def test_session_state_contains_paths_not_audio_bytes(monkeypatch, tmp_path: Pat
     monkeypatch.setattr(
         ui,
         "system_diagnostics",
-        lambda: {
-            "flatpak": False,
-            "installed": False,
-            "open": False,
-            "ffmpeg": False,
-            "models": [],
-            "active": None,
-            "error": None,
-        },
+        lambda: _diagnostics(tts_available=False),
     )
     app = AppTest.from_file("app.py", default_timeout=30).run()
     assert not app.exception
     assert not any(isinstance(value, bytes) for value in app.session_state.filtered_state.values())
     generate_buttons = [button for button in app.button if button.label == "Generar"]
     assert generate_buttons and all(button.disabled for button in generate_buttons)
+
+
+def test_rendering_does_not_generate_or_modify_files(monkeypatch, tmp_path: Path) -> None:
+    paths = AppPaths(tmp_path / "Music")
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: _diagnostics(tts_available=True))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Renderizar no debe sintetizar")
+
+    monkeypatch.setattr(ui, "generate_utterance", forbidden)
+    monkeypatch.setattr(ui, "synthesize_text", forbidden)
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    before = sorted(
+        path.relative_to(paths.root) for path in paths.root.rglob("*") if path.is_file()
+    )
+    app.run()
+    after = sorted(path.relative_to(paths.root) for path in paths.root.rglob("*") if path.is_file())
+    assert not app.exception
+    assert before == after == []
 
 
 def test_generation_service_calls_synthesizer_once_and_keeps_old_preview_on_failure(

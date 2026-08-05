@@ -101,6 +101,16 @@ def build_manifest(
     project: DialogueProject,
     files: list[dict[str, Any]],
 ) -> dict[str, Any]:
+    ready_ids = [
+        utterance.utterance_id
+        for utterance in project.utterances
+        if utterance.status == "ready" and utterance.audio_relative_path
+    ]
+    pending_ids = [
+        utterance.utterance_id
+        for utterance in project.utterances
+        if utterance.utterance_id not in ready_ids
+    ]
     return {
         "format": "speechnote-dialogue-studio-project",
         "schema_version": project.schema_version,
@@ -111,6 +121,8 @@ def build_manifest(
         "updated_at": project.updated_at,
         "speakers": [speaker.__dict__ for speaker in project.speakers],
         "utterances": [utterance.__dict__ for utterance in project.utterances],
+        "ready_utterance_ids": ready_ids,
+        "pending_utterance_ids": pending_ids,
         "pause_ms": project.pause_ms,
         "files": sorted(files, key=lambda item: item["path"]),
     }
@@ -151,9 +163,20 @@ def export_project_zip(
     sources: dict[str, Path] = {}
     entries: list[dict[str, Any]] = []
     for utterance in portable.utterances:
-        if not utterance.audio_relative_path:
+        if utterance.status != "ready" or not utterance.audio_relative_path:
+            utterance.audio_relative_path = None
+            utterance.duration_seconds = None
+            utterance.sha256 = None
             continue
-        source = _safe_source(project_dir / utterance.audio_relative_path, project_dir)
+        try:
+            source = _safe_source(project_dir / utterance.audio_relative_path, project_dir)
+        except (OSError, ValueError):
+            utterance.audio_relative_path = None
+            utterance.duration_seconds = None
+            utterance.sha256 = None
+            utterance.status = "error"
+            utterance.error_message = "El audio no estaba disponible al exportar"
+            continue
         archive_relative = f"audio/segments/{utterance.order:03d}-{utterance.utterance_id}.wav"
         utterance.audio_relative_path = archive_relative
         sources[archive_relative] = source

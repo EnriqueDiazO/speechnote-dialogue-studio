@@ -40,6 +40,10 @@ def test_portable_zip_manifest_scripts_and_deterministic_order(make_wav, tmp_pat
     export_project_zip(project, project_dir, second, master_wav=master)
     assert first.read_bytes() == second.read_bytes()
     assert manifest["format"] == "speechnote-dialogue-studio-project"
+    assert manifest["pending_utterance_ids"] == []
+    assert manifest["ready_utterance_ids"] == [
+        utterance.utterance_id for utterance in project.utterances
+    ]
     assert all(not Path(item["path"]).is_absolute() for item in manifest["files"])
     assert all(len(item["sha256"]) == 64 for item in manifest["files"])
     with zipfile.ZipFile(first) as archive:
@@ -58,7 +62,7 @@ def test_portable_zip_manifest_scripts_and_deterministic_order(make_wav, tmp_pat
         assert str(tmp_path) not in archive.read("speech-dialogue-project/manifest.json").decode()
 
 
-def test_zip_refuses_overwrite_external_destination_and_symlink(make_wav, tmp_path: Path) -> None:
+def test_zip_refuses_overwrite_and_external_destination(make_wav, tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     project, master = _ready_project(make_wav, project_dir)
@@ -68,16 +72,28 @@ def test_zip_refuses_overwrite_external_destination_and_symlink(make_wav, tmp_pa
         export_project_zip(project, project_dir, destination, master_wav=master)
     with pytest.raises(ValueError, match="dentro"):
         export_project_zip(project, project_dir, tmp_path / "outside.zip", master_wav=master)
-    link = project_dir / "audio" / "normalized" / "linked.wav"
-    try:
-        link.symlink_to(project_dir / project.utterances[0].audio_relative_path)
-    except OSError:
-        pytest.skip("El sistema no admite symlinks")
-    project.utterances[0].audio_relative_path = "audio/normalized/linked.wav"
-    with pytest.raises(ValueError, match="simbólicos"):
-        export_project_zip(
-            project,
-            project_dir,
-            project_dir / "exports" / "linked.zip",
-            master_wav=master,
-        )
+
+
+def test_zip_without_audio_marks_pending_and_keeps_script(make_wav, tmp_path: Path) -> None:
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    project, _ = _ready_project(make_wav, project_dir)
+    project.utterances[0].status = "stale"
+    project.utterances[1].status = "draft"
+    project.utterances[1].audio_relative_path = None
+    project.utterances[2].audio_relative_path = "audio/normalized/missing.wav"
+    original = project.to_dict()
+    destination = project_dir / "exports" / "pending.zip"
+
+    _, manifest = export_project_zip(project, project_dir, destination)
+
+    assert manifest["ready_utterance_ids"] == []
+    assert manifest["pending_utterance_ids"] == [
+        utterance.utterance_id for utterance in project.utterances
+    ]
+    assert project.to_dict() == original
+    with zipfile.ZipFile(destination) as archive:
+        names = archive.namelist()
+        assert "speech-dialogue-project/script/dialogue.txt" in names
+        assert "speech-dialogue-project/audio/dialogue.wav" not in names
+        assert not any("/audio/segments/" in name for name in names)

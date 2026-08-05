@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
@@ -10,7 +11,7 @@ import streamlit as st
 
 from .audio import export_mp3, has_ffmpeg, probe_audio
 from .export import export_project_zip
-from .models import DialogueProject
+from .models import DialogueProject, Utterance
 from .paths import AppPaths
 from .service import (
     add_speaker,
@@ -52,6 +53,25 @@ STATUS_LABELS = {
     "error": "Error",
     "stale": "Desactualizado",
 }
+
+
+@dataclass(frozen=True)
+class ProjectCapabilities:
+    """Independent UI capabilities; TTS health never controls project editing."""
+
+    can_edit_project: bool
+    can_synthesize: bool
+    can_build_master: bool
+    can_export_project: bool
+    is_busy: bool
+
+
+@dataclass(frozen=True)
+class UtteranceCapabilities:
+    can_edit: bool
+    can_synthesize: bool
+    can_play: bool
+
 
 CSS = """
 <style>
@@ -122,7 +142,12 @@ def _init_state() -> tuple[AppPaths, ProjectStore]:
         st.session_state.master_mp3 = None
         st.session_state.project_zip = None
         st.session_state.preview_voice = None
-        st.session_state.busy = False
+        st.session_state.active_synthesis_id = None
+        st.session_state.external_actions_enabled = None
+    # ``busy`` existed in v0.1 and could survive an interrupted Streamlit run forever.
+    # Synthesis is synchronous, so any marker seen at the start of a new run is stale.
+    st.session_state.pop("busy", None)
+    st.session_state.active_synthesis_id = None
     return paths, store
 
 
@@ -150,6 +175,68 @@ def _safe_audio(project_dir: Path, relative: str | None) -> Path | None:
     return candidate
 
 
+def _valid_ready_audio(project_dir: Path | None, utterance: Utterance) -> Path | None:
+    if project_dir is None or utterance.status != "ready":
+        return None
+    candidate = _safe_audio(project_dir, utterance.audio_relative_path)
+    if candidate is None:
+        return None
+    try:
+        with candidate.open("rb") as handle:
+            header = handle.read(12)
+        if len(header) != 12 or header[:4] != b"RIFF" or header[8:12] != b"WAVE":
+            return None
+        probe_audio(candidate)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    return candidate
+
+
+def _utterance_capabilities(
+    project: DialogueProject,
+    utterance: Utterance,
+    project_dir: Path | None,
+    capabilities: ProjectCapabilities,
+) -> tuple[UtteranceCapabilities, Path | None]:
+    audio = _valid_ready_audio(project_dir, utterance)
+    return (
+        UtteranceCapabilities(
+            can_edit=capabilities.can_edit_project,
+            can_synthesize=(
+                capabilities.can_synthesize
+                and bool(utterance.text.strip())
+                and bool(project.speaker(utterance.speaker_id).model_id)
+            ),
+            can_play=audio is not None,
+        ),
+        audio,
+    )
+
+
+def _project_capabilities(
+    project: DialogueProject,
+    diagnostics: dict[str, object],
+    project_dir: Path | None,
+) -> ProjectCapabilities:
+    is_busy = st.session_state.active_synthesis_id is not None
+    external_state = diagnostics.get(
+        "external_actions_enabled", st.session_state.external_actions_enabled
+    )
+    tts_available = (
+        bool(diagnostics["installed"]) and bool(diagnostics["open"]) and external_state is not False
+    )
+    playable = [
+        _valid_ready_audio(project_dir, utterance) is not None for utterance in project.utterances
+    ]
+    return ProjectCapabilities(
+        can_edit_project=True,
+        can_synthesize=tts_available and not is_busy,
+        can_build_master=bool(playable) and all(playable) and not is_busy,
+        can_export_project=bool(project.utterances),
+        is_busy=is_busy,
+    )
+
+
 def _system_line(label: str, state: bool | None, detail: str = "") -> None:
     if state is True:
         marker, css = "●", "system-good"
@@ -164,7 +251,12 @@ def _system_line(label: str, state: bool | None, detail: str = "") -> None:
     )
 
 
-def _render_sidebar(paths: AppPaths, store: ProjectStore, diagnostics: dict[str, object]) -> None:
+def _render_sidebar(
+    paths: AppPaths,
+    store: ProjectStore,
+    diagnostics: dict[str, object],
+    capabilities: ProjectCapabilities,
+) -> None:
     project: DialogueProject = st.session_state.project
     with st.sidebar:
         st.markdown("### SpeechNote Dialogue Studio")
@@ -172,11 +264,19 @@ def _render_sidebar(paths: AppPaths, store: ProjectStore, diagnostics: dict[str,
         st.markdown("#### Estado del sistema")
         _system_line("Speech Note", bool(diagnostics["installed"]))
         _system_line("Aplicación abierta", bool(diagnostics["open"]))
-        external_state = None if diagnostics["open"] else False
+        external_state = diagnostics.get(
+            "external_actions_enabled", st.session_state.external_actions_enabled
+        )
+        if not diagnostics["open"]:
+            external_state = False
         _system_line(
             "Invocación externa",
             external_state,
-            "por comprobar" if diagnostics["open"] else "requiere Speech Note abierto",
+            "por comprobar"
+            if diagnostics["open"] and external_state is None
+            else "requiere Speech Note abierto"
+            if not diagnostics["open"]
+            else "",
         )
         _system_line("FFmpeg", bool(diagnostics["ffmpeg"]))
         st.caption(f"Música · {paths.music_dir}")
@@ -196,12 +296,20 @@ def _render_sidebar(paths: AppPaths, store: ProjectStore, diagnostics: dict[str,
         st.divider()
         st.markdown("#### Proyecto")
         actions = st.columns(2)
-        if actions[0].button("Nuevo", use_container_width=True, disabled=st.session_state.busy):
+        if actions[0].button(
+            "Nuevo",
+            use_container_width=True,
+            disabled=not capabilities.can_edit_project,
+        ):
             st.session_state.project = DialogueProject.new()
             st.session_state.project_dir = None
             _reset_artifacts()
             st.rerun()
-        if actions[1].button("Ejemplo", use_container_width=True, disabled=st.session_state.busy):
+        if actions[1].button(
+            "Ejemplo",
+            use_container_width=True,
+            disabled=not capabilities.can_edit_project,
+        ):
             st.session_state.project = DialogueProject.sample()
             st.session_state.project_dir = None
             _reset_artifacts()
@@ -216,7 +324,11 @@ def _render_sidebar(paths: AppPaths, store: ProjectStore, diagnostics: dict[str,
                 format_func=lambda value: labels[value],
                 key="open_project_choice",
             )
-            if st.button("Abrir seleccionado", use_container_width=True):
+            if st.button(
+                "Abrir seleccionado",
+                use_container_width=True,
+                disabled=not capabilities.can_edit_project,
+            ):
                 record = next(item for item in records if item.project_id == selected)
                 st.session_state.project = store.load(record.directory)
                 st.session_state.project_dir = str(record.directory)
@@ -225,11 +337,21 @@ def _render_sidebar(paths: AppPaths, store: ProjectStore, diagnostics: dict[str,
         else:
             st.caption("Aún no hay proyectos guardados.")
 
-        title = st.text_input("Título", project.title, key=f"title-{project.project_id}")
+        title = st.text_input(
+            "Título",
+            project.title,
+            key=f"title-{project.project_id}",
+            disabled=not capabilities.can_edit_project,
+        )
         if title != project.title:
             project.title = title.strip() or "Diálogo sin título"
             project.touch()
-        if st.button("Guardar proyecto", type="primary", use_container_width=True):
+        if st.button(
+            "Guardar proyecto",
+            type="primary",
+            use_container_width=True,
+            disabled=not capabilities.can_edit_project,
+        ):
             try:
                 _ensure_saved(store)
                 st.toast("Proyecto guardado")
@@ -259,7 +381,7 @@ def _render_sidebar(paths: AppPaths, store: ProjectStore, diagnostics: dict[str,
         )
 
 
-def _render_header(project: DialogueProject) -> None:
+def _render_header(project: DialogueProject, capabilities: ProjectCapabilities) -> None:
     st.markdown('<div class="studio-kicker">Estudio de voz académico</div>', unsafe_allow_html=True)
     st.title(project.title)
     st.markdown(
@@ -273,6 +395,7 @@ def _render_header(project: DialogueProject) -> None:
         height=72,
         placeholder="Contexto, objetivo o notas del diálogo…",
         key=f"description-{project.project_id}",
+        disabled=not capabilities.can_edit_project,
     )
     if description != project.description:
         project.description = description
@@ -323,6 +446,7 @@ def _render_speakers(
     project: DialogueProject,
     paths: AppPaths,
     diagnostics: dict[str, object],
+    capabilities: ProjectCapabilities,
 ) -> None:
     st.markdown("## Hablantes")
     st.caption("Cada voz se aplica a todas las intervenciones de ese hablante.")
@@ -336,7 +460,10 @@ def _render_speakers(
             )
             columns = st.columns([1.1, 2.2, 0.8])
             name = columns[0].text_input(
-                "Nombre", speaker.name, key=f"speaker-name-{speaker.speaker_id}"
+                "Nombre",
+                speaker.name,
+                key=f"speaker-name-{speaker.speaker_id}",
+                disabled=not capabilities.can_edit_project,
             )
             if name.strip() and name != speaker.name:
                 speaker.name = name.strip()
@@ -351,6 +478,7 @@ def _render_speakers(
                     index=current_index,
                     format_func=lambda model_id: labels[model_id],
                     key=f"speaker-voice-{speaker.speaker_id}",
+                    disabled=not capabilities.can_edit_project,
                 )
                 if voice != speaker.model_id:
                     update_speaker_voice(project, speaker.speaker_id, voice, labels[voice])
@@ -368,6 +496,7 @@ def _render_speakers(
                 index=list(COLORS).index(speaker.color_key) if speaker.color_key in COLORS else 2,
                 format_func=lambda value: value.capitalize(),
                 key=f"speaker-color-{speaker.speaker_id}",
+                disabled=not capabilities.can_edit_project,
             )
             if color_key != speaker.color_key:
                 speaker.color_key = color_key
@@ -376,7 +505,7 @@ def _render_speakers(
             if actions[0].button(
                 "Probar voz",
                 key=f"test-voice-{speaker.speaker_id}",
-                disabled=not speaker.model_id or not bool(diagnostics["open"]),
+                disabled=not speaker.model_id or not capabilities.can_synthesize,
             ):
                 try:
                     _test_voice(paths, speaker.model_id, speaker.name)
@@ -400,17 +529,30 @@ def _render_speakers(
         st.audio(preview, format="audio/wav")
 
     with st.expander("Añadir hablante"), st.form("add-speaker-form", clear_on_submit=True):
-        name = st.text_input("Nombre", placeholder="Narradora")
+        name = st.text_input(
+            "Nombre",
+            placeholder="Narradora",
+            disabled=not capabilities.can_edit_project,
+        )
         default_voice = options[0] if options else ""
         model_id = st.selectbox(
             "Voz",
             options or [""],
             format_func=lambda value: labels.get(value, "Sin voces detectadas"),
+            disabled=not capabilities.can_edit_project,
         )
         color = st.selectbox(
-            "Color", list(COLORS), index=2, format_func=lambda value: value.capitalize()
+            "Color",
+            list(COLORS),
+            index=2,
+            format_func=lambda value: value.capitalize(),
+            disabled=not capabilities.can_edit_project,
         )
-        if st.form_submit_button("Crear hablante", type="primary"):
+        if st.form_submit_button(
+            "Crear hablante",
+            type="primary",
+            disabled=not capabilities.can_edit_project,
+        ):
             if not name.strip():
                 st.error("Escribe un nombre para el hablante")
             else:
@@ -425,16 +567,16 @@ def _run_generation(
     paths: AppPaths,
     utterance_ids: list[str],
 ) -> None:
-    if st.session_state.busy:
+    if st.session_state.active_synthesis_id is not None:
         st.warning("Ya hay un trabajo en curso")
         return
     directory = _ensure_saved(store)
-    st.session_state.busy = True
     progress = st.progress(0, text="Preparando síntesis…")
     failures = 0
     try:
         total = len(utterance_ids)
         for index, utterance_id in enumerate(utterance_ids, start=1):
+            st.session_state.active_synthesis_id = utterance_id
             utterance = next(
                 item for item in project.utterances if item.utterance_id == utterance_id
             )
@@ -445,8 +587,11 @@ def _run_generation(
             )
             try:
                 generate_utterance(project, directory, utterance_id, paths.root)
+                st.session_state.external_actions_enabled = True
             except (OSError, RuntimeError, ValueError) as exc:
                 failures += 1
+                if "invocación externa está deshabilitada" in str(exc).lower():
+                    st.session_state.external_actions_enabled = False
                 st.error(f"Intervención {utterance.order}: {exc}")
             finally:
                 store.save(project, directory)
@@ -455,7 +600,7 @@ def _run_generation(
         if not failures:
             st.toast("Síntesis completada")
     finally:
-        st.session_state.busy = False
+        st.session_state.active_synthesis_id = None
 
 
 def _generate_one(
@@ -472,6 +617,7 @@ def _render_utterances(
     store: ProjectStore,
     paths: AppPaths,
     diagnostics: dict[str, object],
+    capabilities: ProjectCapabilities,
 ) -> None:
     st.markdown("## Intervenciones")
     st.caption("La síntesis sólo comienza al pulsar un botón de generación.")
@@ -495,6 +641,7 @@ def _render_utterances(
                 index=speaker_ids.index(utterance.speaker_id),
                 format_func=lambda value: speaker_names[value],
                 key=f"utterance-speaker-{utterance.utterance_id}",
+                disabled=not capabilities.can_edit_project,
             )
             text = st.text_area(
                 "Texto",
@@ -502,6 +649,7 @@ def _render_utterances(
                 height=112,
                 placeholder="Escribe esta intervención…",
                 key=f"utterance-text-{utterance.utterance_id}",
+                disabled=not capabilities.can_edit_project,
             )
             if selected_speaker != utterance.speaker_id or text != utterance.text:
                 update_utterance(
@@ -515,30 +663,26 @@ def _render_utterances(
                 st.caption(f"Duración · {utterance.duration_seconds:.2f} s")
             if utterance.error_message:
                 st.error(utterance.error_message)
-            audio = _safe_audio(directory, utterance.audio_relative_path) if directory else None
-            if audio:
+            utterance_capabilities, audio = _utterance_capabilities(
+                project, utterance, directory, capabilities
+            )
+            if utterance_capabilities.can_play and audio:
                 with st.expander("Escuchar"):
                     st.audio(str(audio), format="audio/wav")
             actions = st.columns([1.4, 0.75, 0.75, 0.75, 0.85])
             generate_label = "Regenerar" if utterance.audio_relative_path else "Generar"
-            can_generate = (
-                bool(utterance.text.strip())
-                and bool(project.speaker(utterance.speaker_id).model_id)
-                and bool(diagnostics["open"])
-                and not st.session_state.busy
-            )
             if actions[0].button(
                 generate_label,
                 key=f"generate-{utterance.utterance_id}",
                 type="primary",
-                disabled=not can_generate,
+                disabled=not utterance_capabilities.can_synthesize,
             ):
                 _generate_one(project, store, paths, utterance.utterance_id)
                 st.rerun()
             if actions[1].button(
                 "↑",
                 key=f"up-{utterance.utterance_id}",
-                disabled=index == 0 or st.session_state.busy,
+                disabled=index == 0 or not utterance_capabilities.can_edit,
                 help="Subir",
             ):
                 move_utterance(project, utterance.utterance_id, -1)
@@ -547,7 +691,9 @@ def _render_utterances(
             if actions[2].button(
                 "↓",
                 key=f"down-{utterance.utterance_id}",
-                disabled=index == len(project.utterances) - 1 or st.session_state.busy,
+                disabled=(
+                    index == len(project.utterances) - 1 or not utterance_capabilities.can_edit
+                ),
                 help="Bajar",
             ):
                 move_utterance(project, utterance.utterance_id, 1)
@@ -556,18 +702,20 @@ def _render_utterances(
             if actions[3].button(
                 "Duplicar",
                 key=f"duplicate-{utterance.utterance_id}",
-                disabled=st.session_state.busy,
+                disabled=not utterance_capabilities.can_edit,
             ):
                 duplicate_utterance(project, utterance.utterance_id)
                 _reset_artifacts()
                 st.rerun()
             if actions[4].button(
-                "Eliminar", key=f"delete-{utterance.utterance_id}", disabled=st.session_state.busy
+                "Eliminar",
+                key=f"delete-{utterance.utterance_id}",
+                disabled=not utterance_capabilities.can_edit,
             ):
                 delete_utterance(project, utterance.utterance_id)
                 _reset_artifacts()
                 st.rerun()
-    if st.button("＋ Añadir intervención", disabled=st.session_state.busy):
+    if st.button("＋ Añadir intervención", disabled=not capabilities.can_edit_project):
         add_utterance(project)
         st.rerun()
 
@@ -578,34 +726,41 @@ def _render_global_actions(
     paths: AppPaths,
     diagnostics: dict[str, object],
 ) -> None:
+    project_dir = Path(st.session_state.project_dir) if st.session_state.project_dir else None
+    capabilities = _project_capabilities(project, diagnostics, project_dir)
     st.markdown("## Mezcla y exportación")
     pending = [
         item.utterance_id
         for item in project.utterances
-        if item.status in {"draft", "stale", "error"} and item.text.strip()
+        if item.status in {"draft", "stale", "error"}
+        and item.text.strip()
+        and project.speaker(item.speaker_id).model_id
     ]
-    all_nonempty = [item.utterance_id for item in project.utterances if item.text.strip()]
-    ready = bool(project.utterances) and all(item.status == "ready" for item in project.utterances)
-    speech_ready = bool(diagnostics["open"]) and not st.session_state.busy
+    all_nonempty = [
+        item.utterance_id
+        for item in project.utterances
+        if item.text.strip() and project.speaker(item.speaker_id).model_id
+    ]
+    can_generate_all = len(all_nonempty) == len(project.utterances) and bool(all_nonempty)
     controls = st.columns(4)
     if controls[0].button(
         "Generar pendientes",
         type="primary",
-        disabled=not pending or not speech_ready,
+        disabled=not pending or not capabilities.can_synthesize,
         use_container_width=True,
     ):
         _run_generation(project, store, paths, pending)
         st.rerun()
     if controls[1].button(
         "Generar todas",
-        disabled=not all_nonempty or not speech_ready,
+        disabled=not can_generate_all or not capabilities.can_synthesize,
         use_container_width=True,
     ):
         _run_generation(project, store, paths, all_nonempty)
         st.rerun()
     if controls[2].button(
         "Construir diálogo",
-        disabled=not ready or st.session_state.busy,
+        disabled=not capabilities.can_build_master,
         use_container_width=True,
     ):
         try:
@@ -625,7 +780,7 @@ def _render_global_actions(
             not master_exists
             or not st.session_state.get("enable_mp3", bool(diagnostics["ffmpeg"]))
             or not bool(diagnostics["ffmpeg"])
-            or st.session_state.busy
+            or capabilities.is_busy
         ),
         use_container_width=True,
     ):
@@ -647,7 +802,7 @@ def _render_global_actions(
         st.markdown("### Diálogo maestro")
         with st.expander("Escuchar diálogo", expanded=True):
             st.audio(str(master), format="audio/wav")
-        downloads = st.columns(3)
+        downloads = st.columns(2)
         with master.open("rb") as handle:
             downloads[0].download_button(
                 "Exportar WAV",
@@ -665,21 +820,25 @@ def _render_global_actions(
                     mime="audio/mpeg",
                     use_container_width=True,
                 )
-        if downloads[2].button("Exportar proyecto ZIP", use_container_width=True):
-            try:
-                directory = _ensure_saved(store)
-                destination = directory / "exports" / f"project-{uuid4().hex[:10]}.zip"
-                export_project_zip(
-                    project,
-                    directory,
-                    destination,
-                    master_wav=master,
-                    master_mp3=mp3 if mp3 and mp3.is_file() else None,
-                )
-                st.session_state.project_zip = str(destination)
-                st.toast("Proyecto portable listo")
-            except (OSError, RuntimeError, ValueError) as exc:
-                st.error(str(exc))
+    if st.button(
+        "Exportar proyecto ZIP",
+        disabled=not capabilities.can_export_project,
+        use_container_width=True,
+    ):
+        try:
+            directory = _ensure_saved(store)
+            destination = directory / "exports" / f"project-{uuid4().hex[:10]}.zip"
+            export_project_zip(
+                project,
+                directory,
+                destination,
+                master_wav=master if master and master.is_file() else None,
+                master_mp3=mp3 if mp3 and mp3.is_file() else None,
+            )
+            st.session_state.project_zip = str(destination)
+            st.toast("Proyecto portable listo")
+        except (OSError, RuntimeError, ValueError) as exc:
+            st.error(str(exc))
     project_zip = Path(st.session_state.project_zip) if st.session_state.project_zip else None
     if project_zip and project_zip.is_file():
         with project_zip.open("rb") as handle:
@@ -707,11 +866,13 @@ def main() -> None:
         st.stop()
     diagnostics = system_diagnostics()
     project: DialogueProject = st.session_state.project
-    _render_sidebar(paths, store, diagnostics)
-    _render_header(project)
+    project_dir = Path(st.session_state.project_dir) if st.session_state.project_dir else None
+    capabilities = _project_capabilities(project, diagnostics, project_dir)
+    _render_sidebar(paths, store, diagnostics, capabilities)
+    _render_header(project, capabilities)
     st.divider()
-    _render_speakers(project, paths, diagnostics)
+    _render_speakers(project, paths, diagnostics, capabilities)
     st.divider()
-    _render_utterances(project, store, paths, diagnostics)
+    _render_utterances(project, store, paths, diagnostics, capabilities)
     st.divider()
     _render_global_actions(project, store, paths, diagnostics)
