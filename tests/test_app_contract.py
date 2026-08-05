@@ -154,6 +154,38 @@ def test_editing_remains_available_when_speechnote_is_unavailable(
     assert len(app.session_state.project.utterances) == 2
 
 
+def test_speechnote_refresh_preserves_last_seen_unassigned_voices_when_closed(
+    monkeypatch, tmp_path: Path
+) -> None:
+    paths = AppPaths(tmp_path / "Música")
+    available = _diagnostics(tts_available=True)
+    available["models"] = [
+        *available["models"],
+        TTSModel("es_piper_mx_ald_extra", "Voz extra no asignada"),
+    ]
+    current = {"diagnostics": available}
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: current["diagnostics"])
+
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    speaker = app.session_state.project.speakers[0]
+    configured_voice = speaker.tts_config.voice_id
+    voice_menu = _keyed(app.selectbox, f"speaker-voice-{speaker.speaker_id}")
+    assert "Voz extra no asignada" in voice_menu.options
+    assert _button(app, "Actualizar voces de Speech Note")
+
+    closed = _diagnostics(tts_available=False)
+    closed["models"] = []
+    current["diagnostics"] = closed
+    app.run()
+
+    speaker = app.session_state.project.speakers[0]
+    voice_menu = _keyed(app.selectbox, f"speaker-voice-{speaker.speaker_id}")
+    assert any(option.startswith("Voz extra no asignada") for option in voice_menu.options)
+    assert speaker.tts_config.voice_id == configured_voice
+    assert _button(app, "Actualizar voces de Speech Note")
+
+
 def test_stale_legacy_busy_flag_recovers_without_locking_editing(
     monkeypatch, tmp_path: Path
 ) -> None:

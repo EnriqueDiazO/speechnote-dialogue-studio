@@ -225,6 +225,7 @@ def _init_state() -> tuple[AppPaths, ProjectStore]:
         st.session_state.recovery_notice = None
         st.session_state.qwen_gallery_records = []
         st.session_state.qwen_gallery_options = dict(DEFAULT_GENERATION_OPTIONS)
+        st.session_state.speechnote_voice_catalog = {}
     # ``busy`` existed in v0.1 and could survive an interrupted Streamlit run forever.
     # It is not evidence of a real process-local synthesis and is safe to migrate away.
     st.session_state.pop("busy", None)
@@ -235,6 +236,8 @@ def _init_state() -> tuple[AppPaths, ProjectStore]:
         st.session_state.qwen_gallery_records = []
     if "qwen_gallery_options" not in st.session_state:
         st.session_state.qwen_gallery_options = dict(DEFAULT_GENERATION_OPTIONS)
+    if "speechnote_voice_catalog" not in st.session_state:
+        st.session_state.speechnote_voice_catalog = {}
     _apply_project_widget_reset()
     GLOBAL_SYNTHESIS_COORDINATOR.clear_abandoned()
     return paths, store
@@ -388,11 +391,10 @@ def _render_sidebar(
         st.caption(f"Música · {paths.music_dir}")
         if diagnostics["error"]:
             st.warning(str(diagnostics["error"]))
-        columns = st.columns(2)
-        if columns[0].button("Actualizar", use_container_width=True):
-            system_diagnostics.clear()
+        if st.button("Actualizar voces de Speech Note", use_container_width=True):
+            _clear_diagnostics_cache()
             st.rerun()
-        if columns[1].button("Abrir app", use_container_width=True):
+        if st.button("Abrir app", use_container_width=True):
             try:
                 open_speechnote()
                 st.toast("Speech Note se está abriendo")
@@ -524,6 +526,26 @@ def _clear_diagnostics_cache() -> None:
     clear = getattr(system_diagnostics, "clear", None)
     if callable(clear):
         clear()
+
+
+def _speechnote_models(diagnostics: dict[str, object]) -> dict[str, str]:
+    models = diagnostics.get("models", [])
+    if not isinstance(models, (list, tuple)):
+        return {}
+    return {
+        str(model.model_id): str(model.label)
+        for model in models
+        if getattr(model, "model_id", None)
+    }
+
+
+def _remember_speechnote_voice_catalog(diagnostics: dict[str, object]) -> None:
+    current = _speechnote_models(diagnostics)
+    if not current:
+        return
+    catalog = dict(st.session_state.get("speechnote_voice_catalog", {}))
+    catalog.update(current)
+    st.session_state.speechnote_voice_catalog = catalog
 
 
 def _gib(value: object) -> str:
@@ -661,8 +683,10 @@ def _render_recovery(
 def _model_options(
     project: DialogueProject, diagnostics: dict[str, object]
 ) -> tuple[list[str], dict[str, str]]:
-    models = list(diagnostics["models"])
-    labels = {model.model_id: model.label for model in models}
+    current = _speechnote_models(diagnostics)
+    catalog = dict(st.session_state.get("speechnote_voice_catalog", {}))
+    labels = {voice_id: str(label) for voice_id, label in catalog.items()}
+    labels.update(current)
     for speaker in project.speakers:
         config = speaker.tts_config
         if (
@@ -671,7 +695,13 @@ def _model_options(
             and config.voice_id not in labels
         ):
             labels[config.voice_id] = config.voice_label or config.voice_id
-    return list(labels), labels
+    displayed = {
+        voice_id: (
+            label if voice_id in current else f"{label} · guardada; no detectada ahora"
+        )
+        for voice_id, label in labels.items()
+    }
+    return list(labels), displayed
 
 
 QWEN_VOICE_LABELS = {
@@ -878,6 +908,19 @@ def _render_speakers(
     st.caption("Cada voz se aplica a todas las intervenciones de ese hablante.")
     _apply_speaker_widget_resets()
     speech_options, speech_labels = _model_options(project, diagnostics)
+    current_speech_models = _speechnote_models(diagnostics)
+    preserved_speech_models = st.session_state.get("speechnote_voice_catalog", {})
+    configured_speech_models = {
+        speaker.tts_config.voice_id
+        for speaker in project.speakers
+        if speaker.tts_config.provider == "speechnote" and speaker.tts_config.voice_id
+    }
+    st.caption(
+        "Speech Note · "
+        f"{len(current_speech_models)} disponibles ahora · "
+        f"{len(preserved_speech_models)} conservadas · "
+        f"{len(configured_speech_models)} configuradas"
+    )
     qwen_voices, qwen_languages = _qwen_options(diagnostics)
     for speaker in list(project.speakers):
         config = speaker.tts_config
@@ -1755,6 +1798,7 @@ def main() -> None:
         st.error(f"No se pudo preparar la carpeta de trabajo: {exc}")
         st.stop()
     diagnostics = system_diagnostics()
+    _remember_speechnote_voice_catalog(diagnostics)
     project: DialogueProject = st.session_state.project
     project_dir = Path(st.session_state.project_dir) if st.session_state.project_dir else None
     capabilities = _project_capabilities(project, diagnostics, project_dir)
