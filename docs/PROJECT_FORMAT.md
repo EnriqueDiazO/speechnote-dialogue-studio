@@ -23,6 +23,11 @@ Cada intervención contiene `utterance_id`, `order`, `speaker_id`, `text`,
 `audio_relative_path`, `duration_seconds`, `sha256`, `status`, `error_message`, `created_at` y
 `updated_at`. Los estados válidos son `draft`, `generating`, `ready`, `error` y `stale`.
 
+`generating` se admite al leer proyectos antiguos, pero representa exclusivamente un instante de
+ejecución. Al guardar, se serializa como `stale` recuperable; identificadores como `busy`,
+`active_synthesis_id`, `generation_in_progress`, tokens de sesión y locks nunca forman parte de
+`project.json`.
+
 `audio_relative_path` siempre usa una ruta POSIX relativa al directorio del proyecto, por ejemplo:
 
 ```text
@@ -39,6 +44,11 @@ construye con `wave` sobre esos segmentos e inserta silencio sólo entre interve
 
 La aplicación conserva tomas anteriores al regenerar y calcula SHA-256 de cada segmento y de los
 exports. El MP3 opcional usa `libmp3lame`, 192 kbps, 48000 Hz y mono.
+
+Un proyecto antiguo que contenga `generating`, o el mensaje histórico de concurrencia, puede
+recuperarse sin cambiar el esquema. Los WAV válidos se verifican por identificador de intervención,
+cabecera RIFF/WAVE, ffprobe, duración positiva y SHA-256. Los archivos inválidos se preservan con
+sufijo `.partial`; no se reproducen ni se eliminan.
 
 ## ZIP portable
 

@@ -103,6 +103,21 @@ Si aparece `Action invocation is not enabled in settings`, abre Speech Note y ac
 Permitir aplicaciones externas para invocar acciones**. Si no se crea el archivo, comprueba que
 la aplicación esté abierta, que la voz esté descargada y que Flatpak tenga acceso a Música.
 
+### Síntesis interrumpida
+
+Una síntesis activa se coordina únicamente en memoria y nunca se guarda como lock del proyecto.
+Si Streamlit o Speech Note se interrumpen, al volver a abrir el proyecto aparecerá **Recuperar
+síntesis interrumpida** sólo cuando exista una inconsistencia. La recuperación:
+
+- adopta como `ready` un WAV válido que corresponde a la intervención;
+- marca como `stale` una salida ausente para permitir regenerarla;
+- conserva una salida inválida bajo `audio/recovery/` con sufijo `.partial`;
+- no borra tomas válidas, texto, hablantes ni orden.
+
+`make doctor` informa cantidades de intervenciones interrumpidas, WAV recuperables, archivos
+parciales y locks persistentes sin mostrar el contenido del guion. Funciona aunque Speech Note
+esté cerrado.
+
 ## Alcance del MVP
 
 Incluye edición multi-hablante, persistencia JSON, generación/regeneración individual y por lote,
