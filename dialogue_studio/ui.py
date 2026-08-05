@@ -189,6 +189,27 @@ def system_diagnostics() -> dict[str, object]:
     return data
 
 
+def _request_project_widget_reset() -> None:
+    st.session_state.reset_project_widgets = True
+
+
+def _apply_project_widget_reset() -> None:
+    if not st.session_state.pop("reset_project_widgets", False):
+        return
+    prefixes = (
+        "speaker-",
+        "utterance-",
+        "title-",
+        "description-",
+        "pause-",
+        "new-speaker-",
+    )
+    for key in list(st.session_state):
+        if key.startswith(prefixes):
+            st.session_state.pop(key, None)
+    st.session_state.qwen_gallery_records = []
+
+
 def _init_state() -> tuple[AppPaths, ProjectStore]:
     paths = AppPaths.discover()
     store = ProjectStore(paths)
@@ -214,6 +235,7 @@ def _init_state() -> tuple[AppPaths, ProjectStore]:
         st.session_state.qwen_gallery_records = []
     if "qwen_gallery_options" not in st.session_state:
         st.session_state.qwen_gallery_options = dict(DEFAULT_GENERATION_OPTIONS)
+    _apply_project_widget_reset()
     GLOBAL_SYNTHESIS_COORDINATOR.clear_abandoned()
     return paths, store
 
@@ -387,6 +409,7 @@ def _render_sidebar(
         ):
             st.session_state.project = DialogueProject.new()
             st.session_state.project_dir = None
+            _request_project_widget_reset()
             _reset_artifacts()
             st.rerun()
         if actions[1].button(
@@ -396,6 +419,7 @@ def _render_sidebar(
         ):
             st.session_state.project = DialogueProject.sample()
             st.session_state.project_dir = None
+            _request_project_widget_reset()
             _reset_artifacts()
             st.rerun()
 
@@ -419,6 +443,7 @@ def _render_sidebar(
                 record = next(item for item in records if item.project_id == selected)
                 st.session_state.project = store.load(record.directory)
                 st.session_state.project_dir = str(record.directory)
+                _request_project_widget_reset()
                 _reset_artifacts()
                 st.rerun()
         else:
@@ -949,7 +974,12 @@ def _render_speakers(
                     language=language,
                     generation_options=generation_options,
                 )
-                if updated != config:
+                qwen_changed = (
+                    updated.voice_id != config.voice_id
+                    or updated.language != config.language
+                    or generation_options != _qwen_defaults(config)
+                )
+                if qwen_changed:
                     update_speaker_tts(project, speaker.speaker_id, updated)
                     _reset_artifacts()
                     if reset:
@@ -1406,16 +1436,30 @@ def _render_utterance_tts_override(
             key=f"utterance-speechnote-voice-{utterance.utterance_id}",
             disabled=disabled,
         )
-        language = "auto"
+        language = effective.language
         options = {}
         reset = False
-    updated = UtteranceTTSOverride(
-        provider=provider,
-        voice_id=voice,
-        language=language,
-        generation_options=options,
+    base = project.speaker(utterance.speaker_id).tts_config
+    current_options = _qwen_defaults(effective) if provider == "qwen" else {}
+    desired_changed = (
+        provider != effective.provider
+        or voice != effective.voice_id
+        or language != effective.language
+        or options != current_options
     )
-    if updated != existing:
+    updated = UtteranceTTSOverride(
+        provider=provider if provider != base.provider else None,
+        voice_id=voice if voice != base.voice_id else None,
+        language=language if language != base.language else None,
+        generation_options={
+            name: value
+            for name, value in options.items()
+            if value != _qwen_defaults(base).get(name)
+        }
+        if provider == "qwen"
+        else {},
+    )
+    if desired_changed:
         update_utterance_tts_override(project, utterance.utterance_id, updated)
         _reset_artifacts()
         if reset:

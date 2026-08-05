@@ -534,7 +534,7 @@ def test_qwen_sampling_and_utterance_override_persist_and_mark_stale(
         "vivian"
     ).run()
     assert utterance.tts_override is not None
-    assert utterance.tts_override.provider == "qwen"
+    assert utterance.tts_override.provider is None
     assert utterance.tts_override.voice_id == "vivian"
 
 
@@ -614,3 +614,40 @@ def test_qwen_only_project_can_generate_without_speechnote(
     assert not generate.disabled
     generate.click().run()
     assert calls == ["qwen"]
+
+
+def test_rendering_inherited_qwen_override_does_not_mark_ready_audio_stale(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from dialogue_studio.models import SpeakerTTSConfig, UtteranceTTSOverride
+    from dialogue_studio.service import update_speaker_tts
+
+    paths = AppPaths(tmp_path / "Music")
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(
+        ui,
+        "system_diagnostics",
+        lambda: _diagnostics(tts_available=True, qwen_available=True),
+    )
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    project = app.session_state.project
+    utterance = project.utterances[0]
+    update_speaker_tts(
+        project,
+        utterance.speaker_id,
+        SpeakerTTSConfig(
+            provider="qwen",
+            voice_id="serena",
+            voice_label="Serena",
+            language="spanish",
+            generation_options={"seed": 1, "temperature": 0.9},
+        ),
+    )
+    utterance.tts_override = UtteranceTTSOverride(voice_id="vivian")
+    utterance.status = "ready"
+    app.session_state.reset_project_widgets = True
+    app.run()
+    assert app.session_state.project.utterances[0].status == "ready"
+    assert app.session_state.project.utterances[0].tts_override == UtteranceTTSOverride(
+        voice_id="vivian"
+    )
