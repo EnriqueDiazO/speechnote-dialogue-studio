@@ -23,6 +23,8 @@ from .models import (
     utc_now,
 )
 from .paths import safe_write_path
+from .qwen_client import synthesize_qwen_text
+from .qwen_service import DEFAULT_GENERATION_OPTIONS
 from .speechnote import synthesize_text
 from .synthesis import SynthesisBusyError
 
@@ -132,6 +134,9 @@ def audio_input_fingerprint(project: DialogueProject, utterance: Utterance) -> s
         if config.provider == "qwen"
         else "net.mkiol.SpeechNote"
     )
+    generation_options = dict(config.generation_options)
+    if config.provider == "qwen":
+        generation_options = {**DEFAULT_GENERATION_OPTIONS, **generation_options}
     payload = {
         "text": utterance.text,
         "speaker_id": speaker.speaker_id,
@@ -141,7 +146,7 @@ def audio_input_fingerprint(project: DialogueProject, utterance: Utterance) -> s
         "voice_id": config.voice_id,
         "language": config.language,
         "instruction_text": config.instruction_text,
-        "generation_options": config.generation_options,
+        "generation_options": generation_options,
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -233,14 +238,16 @@ def generate_utterance(
     controlled_root: Path,
     *,
     synthesizer: Callable[..., None] = synthesize_text,
+    qwen_synthesizer: Callable[..., object] = synthesize_qwen_text,
     normalizer: Callable[..., AudioInfo] = normalize_audio,
     output_paths: GenerationPaths | None = None,
 ) -> Utterance:
     utterance = next(item for item in project.utterances if item.utterance_id == utterance_id)
     speaker = project.speaker(utterance.speaker_id)
+    tts = effective_tts_config(project, utterance)
     if not utterance.text.strip():
         raise ValueError("No se puede sintetizar una intervención vacía")
-    if not speaker.model_id.strip():
+    if not tts.voice_id.strip():
         raise ValueError(f"{speaker.name} no tiene una voz asignada")
     paths = output_paths or prepare_generation_paths(project_dir, utterance, controlled_root)
     previous_state = (
@@ -254,13 +261,26 @@ def generate_utterance(
     utterance.error_message = None
     utterance.updated_at = utc_now()
     try:
-        synthesizer(
-            speaker.model_id,
-            utterance.text,
-            paths.raw,
-            controlled_root,
-            probe=probe_audio,
-        )
+        if tts.provider == "qwen":
+            generation_options = {
+                **DEFAULT_GENERATION_OPTIONS,
+                **tts.generation_options,
+            }
+            qwen_synthesizer(
+                tts.voice_id,
+                utterance.text,
+                tts.language,
+                generation_options,
+                paths.raw,
+            )
+        else:
+            synthesizer(
+                tts.voice_id,
+                utterance.text,
+                paths.raw,
+                controlled_root,
+                probe=probe_audio,
+            )
         info = normalizer(paths.raw, paths.normalized)
     except SynthesisBusyError:
         (

@@ -1269,9 +1269,13 @@ def _run_generation(
             )
             output_paths = prepare_generation_paths(directory, utterance, paths.root)
             voice = project.speaker(utterance.speaker_id)
+            tts = effective_tts_config(project, utterance)
             progress.progress(
                 (index - 1) / total,
-                text=f"Intervención {index} de {total} · {voice.name} · sintetizando",
+                text=(
+                    f"Intervención {index} de {total} · {voice.name} · "
+                    f"{PROVIDER_LABELS[tts.provider]} / {tts.voice_id} · sintetizando"
+                ),
             )
             try:
                 run_with_synthesis_state(
@@ -1287,7 +1291,8 @@ def _run_generation(
                         output_paths=current_paths,
                     ),
                 )
-                st.session_state.external_actions_enabled = True
+                if tts.provider == "speechnote":
+                    st.session_state.external_actions_enabled = True
             except SynthesisBusyError:
                 failures += 1
                 st.info(f"Sintetizando intervención {utterance.order:02d}…")
@@ -1304,6 +1309,7 @@ def _run_generation(
             st.toast("Síntesis completada")
     finally:
         GLOBAL_SYNTHESIS_COORDINATOR.clear_abandoned()
+        _clear_diagnostics_cache()
 
 
 def _generate_one(
@@ -1554,26 +1560,46 @@ def _render_global_actions(
         for item in project.utterances
         if item.status in {"draft", "stale", "error"}
         and item.text.strip()
-        and project.speaker(item.speaker_id).model_id
+        and effective_tts_config(project, item).voice_id
     ]
     all_nonempty = [
         item.utterance_id
         for item in project.utterances
-        if item.text.strip() and project.speaker(item.speaker_id).model_id
+        if item.text.strip() and effective_tts_config(project, item).voice_id
     ]
     can_generate_all = len(all_nonempty) == len(project.utterances) and bool(all_nonempty)
+
+    def providers_available(utterance_ids: list[str]) -> bool:
+        selected = [
+            item for item in project.utterances if item.utterance_id in utterance_ids
+        ]
+        return all(
+            capabilities.qwen_available
+            if effective_tts_config(project, item).provider == "qwen"
+            else capabilities.speechnote_available
+            for item in selected
+        )
+
     controls = st.columns(4)
     if controls[0].button(
         "Generar pendientes",
         type="primary",
-        disabled=not pending or not capabilities.can_synthesize,
+        disabled=(
+            not pending
+            or not capabilities.can_synthesize
+            or not providers_available(pending)
+        ),
         use_container_width=True,
     ):
         _run_generation(project, store, paths, pending)
         st.rerun()
     if controls[1].button(
         "Generar todas",
-        disabled=not can_generate_all or not capabilities.can_synthesize,
+        disabled=(
+            not can_generate_all
+            or not capabilities.can_synthesize
+            or not providers_available(all_nonempty)
+        ),
         use_container_width=True,
     ):
         _run_generation(project, store, paths, all_nonempty)

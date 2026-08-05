@@ -568,3 +568,49 @@ def test_qwen_gallery_preview_assigns_voice_without_changing_utterance_audio(
     assert speaker.tts_config.provider == "qwen"
     assert speaker.tts_config.voice_id == "vivian"
     assert utterance.audio_relative_path is None
+
+
+def test_qwen_only_project_can_generate_without_speechnote(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from dialogue_studio.models import SpeakerTTSConfig, effective_tts_config
+    from dialogue_studio.service import update_speaker_tts
+
+    paths = AppPaths(tmp_path / "Music")
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(
+        ui,
+        "system_diagnostics",
+        lambda: _diagnostics(tts_available=False, qwen_available=True),
+    )
+    calls = []
+
+    def fake_generate(project, project_dir, utterance_id, controlled_root, **_kwargs):
+        utterance = next(item for item in project.utterances if item.utterance_id == utterance_id)
+        calls.append(effective_tts_config(project, utterance).provider)
+        utterance.status = "ready"
+        return utterance
+
+    monkeypatch.setattr(ui, "generate_utterance", fake_generate)
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    project = app.session_state.project
+    utterance = project.utterances[0]
+    update_speaker_tts(
+        project,
+        utterance.speaker_id,
+        SpeakerTTSConfig(
+            provider="qwen",
+            voice_id="serena",
+            voice_label="Serena",
+            language="spanish",
+        ),
+    )
+    app.session_state.speaker_widget_resets = [utterance.speaker_id]
+    app.run()
+    _keyed(app.text_area, f"utterance-text-{utterance.utterance_id}").set_value(
+        "Generación local con Qwen"
+    ).run()
+    generate = _keyed(app.button, f"generate-{utterance.utterance_id}")
+    assert not generate.disabled
+    generate.click().run()
+    assert calls == ["qwen"]

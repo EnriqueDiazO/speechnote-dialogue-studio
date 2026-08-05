@@ -17,8 +17,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .audio import probe_audio
 from .paths import AppPaths
 from .qwen_service import DEFAULT_MODEL
+from .synthesis import SynthesisBusyError
 
 DEFAULT_QWEN_PYTHON = Path("/home/enriquedo/PersonalProjects/qwen/.venv-qwen/bin/python")
 
@@ -151,6 +153,46 @@ class QwenClient:
 
     def shutdown(self) -> dict[str, Any]:
         return self._request("POST", "/shutdown", {})
+
+
+def synthesize_qwen_text(
+    voice_id: str,
+    text: str,
+    language: str,
+    generation_options: dict[str, int | float],
+    output_path: Path,
+    *,
+    client: QwenClient | None = None,
+) -> dict[str, Any]:
+    """Generate and validate one native 24 kHz Qwen WAV without importing Qwen."""
+    active_client = client or QwenClient()
+    try:
+        response = active_client.synthesize(
+            text=text,
+            speaker=voice_id,
+            language=language,
+            generation_options=generation_options,
+            output_path=output_path,
+        )
+    except QwenClientError as exc:
+        if exc.code == "gpu_busy":
+            raise SynthesisBusyError("Hay una síntesis Qwen real activa") from exc
+        raise
+    try:
+        reported_path = Path(str(response["output_path"])).resolve()
+    except (KeyError, OSError, ValueError) as exc:
+        raise QwenClientError("Qwen no confirmó una ruta de salida válida") from exc
+    if reported_path != output_path.resolve():
+        raise QwenClientError("Qwen confirmó una ruta de salida inesperada")
+    info = probe_audio(output_path)
+    if (
+        info.codec != "pcm_s16le"
+        or info.sample_rate != 24_000
+        or info.channels != 1
+        or info.duration_seconds <= 0
+    ):
+        raise QwenClientError("Qwen no produjo PCM 16-bit mono a 24000 Hz")
+    return response
 
 
 class QwenBackendManager:
