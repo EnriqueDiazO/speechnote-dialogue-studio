@@ -4,14 +4,28 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from .audio import AudioInfo, concatenate_waves, normalize_audio, probe_audio, sha256_file
-from .models import DialogueProject, SpeakerProfile, Utterance, utc_now
+from .models import (
+    RECOVERABLE_SYNTHESIS_MESSAGE,
+    DialogueProject,
+    SpeakerProfile,
+    Utterance,
+    utc_now,
+)
 from .paths import safe_write_path
 from .speechnote import synthesize_text
+from .synthesis import SynthesisBusyError
+
+
+@dataclass(frozen=True)
+class GenerationPaths:
+    raw: Path
+    normalized: Path
 
 
 def update_utterance(
@@ -133,6 +147,7 @@ def generate_utterance(
     *,
     synthesizer: Callable[..., None] = synthesize_text,
     normalizer: Callable[..., AudioInfo] = normalize_audio,
+    output_paths: GenerationPaths | None = None,
 ) -> Utterance:
     utterance = next(item for item in project.utterances if item.utterance_id == utterance_id)
     speaker = project.speaker(utterance.speaker_id)
@@ -140,17 +155,14 @@ def generate_utterance(
         raise ValueError("No se puede sintetizar una intervención vacía")
     if not speaker.model_id.strip():
         raise ValueError(f"{speaker.name} no tiene una voz asignada")
-    token = uuid4().hex[:10]
-    filename = f"{utterance.order:03d}-{utterance.utterance_id}-{token}.wav"
-    raw = project_dir / "audio" / "raw" / filename
-    normalized = (
-        project_dir
-        / "audio"
-        / "normalized"
-        / f"{utterance.order:03d}-{utterance.utterance_id}-{token}.wav"
+    paths = output_paths or prepare_generation_paths(project_dir, utterance, controlled_root)
+    previous_state = (
+        utterance.status,
+        utterance.audio_relative_path,
+        utterance.duration_seconds,
+        utterance.sha256,
+        utterance.error_message,
     )
-    raw = safe_write_path(controlled_root, raw.relative_to(controlled_root))
-    normalized = safe_write_path(controlled_root, normalized.relative_to(controlled_root))
     utterance.status = "generating"
     utterance.error_message = None
     utterance.updated_at = utc_now()
@@ -158,25 +170,55 @@ def generate_utterance(
         synthesizer(
             speaker.model_id,
             utterance.text,
-            raw,
+            paths.raw,
             controlled_root,
             probe=probe_audio,
         )
-        info = normalizer(raw, normalized)
+        info = normalizer(paths.raw, paths.normalized)
+    except SynthesisBusyError:
+        (
+            utterance.status,
+            utterance.audio_relative_path,
+            utterance.duration_seconds,
+            utterance.sha256,
+            utterance.error_message,
+        ) = previous_state
+        raise
+    except (KeyboardInterrupt, SystemExit):
+        utterance.status = "stale"
+        utterance.error_message = RECOVERABLE_SYNTHESIS_MESSAGE
+        utterance.updated_at = utc_now()
+        project.touch()
+        raise
     except Exception as exc:
         utterance.status = "error"
         utterance.error_message = str(exc)
         utterance.updated_at = utc_now()
         project.touch()
         raise
-    utterance.audio_relative_path = normalized.relative_to(project_dir).as_posix()
+    utterance.audio_relative_path = paths.normalized.relative_to(project_dir).as_posix()
     utterance.duration_seconds = info.duration_seconds
-    utterance.sha256 = sha256_file(normalized)
+    utterance.sha256 = sha256_file(paths.normalized)
     utterance.status = "ready"
     utterance.error_message = None
     utterance.updated_at = utc_now()
     project.touch()
     return utterance
+
+
+def prepare_generation_paths(
+    project_dir: Path,
+    utterance: Utterance,
+    controlled_root: Path,
+) -> GenerationPaths:
+    token = uuid4().hex[:10]
+    filename = f"{utterance.order:03d}-{utterance.utterance_id}-{token}.wav"
+    raw = project_dir / "audio" / "raw" / filename
+    normalized = project_dir / "audio" / "normalized" / filename
+    return GenerationPaths(
+        raw=safe_write_path(controlled_root, raw.relative_to(controlled_root)),
+        normalized=safe_write_path(controlled_root, normalized.relative_to(controlled_root)),
+    )
 
 
 def build_master(project: DialogueProject, project_dir: Path) -> tuple[Path, AudioInfo]:

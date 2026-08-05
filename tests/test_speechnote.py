@@ -71,6 +71,7 @@ def test_synthesis_builds_exact_safe_command(monkeypatch, tmp_path: Path) -> Non
     ]
     assert "shell" not in calls[0][1]
     assert waited == [output]
+    assert not sn.synthesis_lock_active()
 
 
 def test_external_invocation_disabled_has_instructions(tmp_path: Path) -> None:
@@ -79,6 +80,7 @@ def test_external_invocation_disabled_has_instructions(tmp_path: Path) -> None:
 
     with pytest.raises(sn.SpeechNoteError, match="Ajustes"):
         sn.synthesize_text("voice", "Hola", tmp_path / "out.wav", tmp_path, runner=runner)
+    assert not sn.synthesis_lock_active()
 
 
 def test_wait_for_wave_valid_invalid_and_timeout(make_wav, tmp_path: Path) -> None:
@@ -112,3 +114,53 @@ def test_synthesis_rejects_empty_text_bad_model_and_outside_path(tmp_path: Path)
         sn.synthesize_text("bad model", "Hola", tmp_path / "out.wav", tmp_path)
     with pytest.raises(ValueError, match="controlada"):
         sn.synthesize_text("voice", "Hola", tmp_path / "out.wav", tmp_path / "other")
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.TimeoutExpired(["flatpak"], 1),
+        RuntimeError("unexpected"),
+    ],
+    ids=["timeout", "unexpected"],
+)
+def test_command_failures_release_module_lock(failure: Exception, tmp_path: Path) -> None:
+    def runner(args, **kwargs):
+        raise failure
+
+    with pytest.raises((sn.SpeechNoteError, RuntimeError)):
+        sn.synthesize_text(
+            "voice",
+            "Hola",
+            tmp_path / "output.wav",
+            tmp_path,
+            runner=runner,
+        )
+    assert not sn.synthesis_lock_active()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        sn.SpeechNoteError("WAV inválido"),
+        RuntimeError("ffprobe falló"),
+    ],
+    ids=["invalid-wav", "ffprobe"],
+)
+def test_output_validation_failures_release_module_lock(
+    monkeypatch, failure: Exception, tmp_path: Path
+) -> None:
+    def fail_wait(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(sn, "wait_for_wave", fail_wait)
+
+    with pytest.raises(type(failure)):
+        sn.synthesize_text(
+            "voice",
+            "Hola",
+            tmp_path / "output.wav",
+            tmp_path,
+            runner=lambda *args, **kwargs: completed(),
+        )
+    assert not sn.synthesis_lock_active()

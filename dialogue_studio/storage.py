@@ -8,12 +8,22 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .models import DialogueProject
+from .models import RECOVERABLE_SYNTHESIS_MESSAGE, DialogueProject
 from .paths import AppPaths, safe_write_path
 
 
 def deterministic_json(data: object) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+
+
+def persistent_project_data(project: DialogueProject) -> dict[str, object]:
+    """Serialize transient generating states as recoverable stale states."""
+    data = project.to_dict()
+    for utterance in data["utterances"]:  # type: ignore[index]
+        if utterance["status"] == "generating":
+            utterance["status"] = "stale"
+            utterance["error_message"] = RECOVERABLE_SYNTHESIS_MESSAGE
+    return data
 
 
 def atomic_write_text(path: Path, content: str) -> None:
@@ -68,7 +78,7 @@ class ProjectStore:
         target = safe_write_path(directory, "project.json")
         if target.exists() and not allow_overwrite:
             raise FileExistsError("El proyecto ya existe; confirma antes de sobrescribirlo")
-        atomic_write_text(target, deterministic_json(project.to_dict()))
+        atomic_write_text(target, deterministic_json(persistent_project_data(project)))
         return directory
 
     def load(self, directory: Path) -> DialogueProject:

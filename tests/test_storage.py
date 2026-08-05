@@ -38,6 +38,21 @@ def test_save_refuses_unconfirmed_overwrite(tmp_path: Path) -> None:
         store.save(project, directory, allow_overwrite=False)
 
 
+def test_generating_is_never_persisted_as_an_active_lock(tmp_path: Path) -> None:
+    store = ProjectStore(AppPaths(tmp_path / "Music"))
+    project = DialogueProject.new()
+    project.utterances[0].status = "generating"
+
+    directory = store.save(project)
+    payload = json.loads((directory / "project.json").read_text(encoding="utf-8"))
+    loaded = store.load(directory)
+
+    assert project.utterances[0].status == "generating"
+    assert payload["utterances"][0]["status"] == "stale"
+    assert loaded.utterances[0].status == "stale"
+    assert not any(key in payload for key in ("busy", "active_synthesis", "active_synthesis_id"))
+
+
 def test_safe_write_path_rejects_escape_and_symlink(tmp_path: Path) -> None:
     root = tmp_path / "root"
     root.mkdir()

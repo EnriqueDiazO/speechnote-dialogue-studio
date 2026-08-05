@@ -10,6 +10,9 @@ from uuid import UUID, uuid4
 
 SCHEMA_VERSION = 1
 UTTERANCE_STATES = {"draft", "generating", "ready", "error", "stale"}
+RECOVERABLE_SYNTHESIS_MESSAGE = (
+    "La síntesis anterior no terminó. Puedes editar o regenerar esta intervención."
+)
 
 
 def utc_now() -> str:

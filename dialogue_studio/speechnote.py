@@ -11,6 +11,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from .synthesis import SynthesisBusyError
+
 APP_ID = "net.mkiol.SpeechNote"
 MODEL_PATTERN = re.compile(r'^\s*([\w.-]+)\s+"([^"]+)"\s*$')
 
@@ -34,6 +36,10 @@ class CommandResult:
 
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 _SYNTHESIS_LOCK = threading.Lock()
+
+
+def synthesis_lock_active() -> bool:
+    return _SYNTHESIS_LOCK.locked()
 
 
 def _run(
@@ -228,7 +234,7 @@ def synthesize_text(
         raise FileExistsError("La salida ya existe; usa una ruta nueva para regenerar")
     output_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if not _SYNTHESIS_LOCK.acquire(blocking=False):
-        raise SpeechNoteError("Ya hay una síntesis en curso")
+        raise SynthesisBusyError("Hay una síntesis real activa")
     try:
         result = _run(
             _flatpak_command(

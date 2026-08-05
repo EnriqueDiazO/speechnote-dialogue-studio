@@ -13,6 +13,11 @@ from .audio import export_mp3, has_ffmpeg, probe_audio
 from .export import export_project_zip
 from .models import DialogueProject, Utterance
 from .paths import AppPaths
+from .recovery import (
+    RECOVERABLE_MESSAGE,
+    inspect_interrupted_synthesis,
+    recover_interrupted_synthesis,
+)
 from .service import (
     add_speaker,
     add_utterance,
@@ -21,6 +26,7 @@ from .service import (
     duplicate_utterance,
     generate_utterance,
     move_utterance,
+    prepare_generation_paths,
     project_metrics,
     remove_speaker,
     update_speaker_voice,
@@ -37,6 +43,11 @@ from .speechnote import (
     synthesize_text,
 )
 from .storage import ProjectStore
+from .synthesis import (
+    GLOBAL_SYNTHESIS_COORDINATOR,
+    SynthesisBusyError,
+    run_with_synthesis_state,
+)
 
 COLORS = {
     "professor": "#D1A65A",
@@ -63,7 +74,8 @@ class ProjectCapabilities:
     can_synthesize: bool
     can_build_master: bool
     can_export_project: bool
-    is_busy: bool
+    has_active_synthesis: bool
+    active_utterance_id: str | None
 
 
 @dataclass(frozen=True)
@@ -125,8 +137,9 @@ def system_diagnostics() -> dict[str, object]:
         data["installed"] = check_speechnote_installed()
         if data["installed"]:
             data["open"] = check_speechnote_open()
-            data["models"] = list_tts_models()
-            data["active"] = get_active_tts_model()
+            if data["open"]:
+                data["models"] = list_tts_models()
+                data["active"] = get_active_tts_model()
     except (RuntimeError, SpeechNoteError) as exc:
         data["error"] = str(exc)
     return data
@@ -142,12 +155,16 @@ def _init_state() -> tuple[AppPaths, ProjectStore]:
         st.session_state.master_mp3 = None
         st.session_state.project_zip = None
         st.session_state.preview_voice = None
-        st.session_state.active_synthesis_id = None
         st.session_state.external_actions_enabled = None
+        st.session_state.session_token = uuid4().hex
+        st.session_state.recovery_notice = None
     # ``busy`` existed in v0.1 and could survive an interrupted Streamlit run forever.
-    # Synthesis is synchronous, so any marker seen at the start of a new run is stale.
+    # It is not evidence of a real process-local synthesis and is safe to migrate away.
     st.session_state.pop("busy", None)
-    st.session_state.active_synthesis_id = None
+    st.session_state.pop("active_synthesis_id", None)
+    if "session_token" not in st.session_state:
+        st.session_state.session_token = uuid4().hex
+    GLOBAL_SYNTHESIS_COORDINATOR.clear_abandoned()
     return paths, store
 
 
@@ -201,7 +218,10 @@ def _utterance_capabilities(
     audio = _valid_ready_audio(project_dir, utterance)
     return (
         UtteranceCapabilities(
-            can_edit=capabilities.can_edit_project,
+            can_edit=(
+                capabilities.can_edit_project
+                and capabilities.active_utterance_id != utterance.utterance_id
+            ),
             can_synthesize=(
                 capabilities.can_synthesize
                 and bool(utterance.text.strip())
@@ -218,7 +238,8 @@ def _project_capabilities(
     diagnostics: dict[str, object],
     project_dir: Path | None,
 ) -> ProjectCapabilities:
-    is_busy = st.session_state.active_synthesis_id is not None
+    active = GLOBAL_SYNTHESIS_COORDINATOR.active
+    has_active_synthesis = active is not None
     external_state = diagnostics.get(
         "external_actions_enabled", st.session_state.external_actions_enabled
     )
@@ -230,10 +251,11 @@ def _project_capabilities(
     ]
     return ProjectCapabilities(
         can_edit_project=True,
-        can_synthesize=tts_available and not is_busy,
-        can_build_master=bool(playable) and all(playable) and not is_busy,
+        can_synthesize=tts_available and not has_active_synthesis,
+        can_build_master=(bool(playable) and all(playable) and not has_active_synthesis),
         can_export_project=bool(project.utterances),
-        is_busy=is_busy,
+        has_active_synthesis=has_active_synthesis,
+        active_utterance_id=active.utterance_id if active else None,
     )
 
 
@@ -317,7 +339,10 @@ def _render_sidebar(
 
         records = store.list_projects()
         if records:
-            labels = {record.project_id: record.title for record in records}
+            labels = {
+                record.project_id: f"{record.title} · {record.project_id[:8]}"
+                for record in records
+            }
             selected = st.selectbox(
                 "Proyectos guardados",
                 options=[record.project_id for record in records],
@@ -408,6 +433,58 @@ def _render_header(project: DialogueProject, capabilities: ProjectCapabilities) 
     columns[3].metric("Pendientes", metrics["pending"])
 
 
+def _render_recovery(
+    project: DialogueProject,
+    store: ProjectStore,
+    capabilities: ProjectCapabilities,
+) -> None:
+    notice = st.session_state.get("recovery_notice")
+    if notice:
+        st.success(str(notice))
+        st.session_state.recovery_notice = None
+    current = st.session_state.project_dir
+    if not current:
+        return
+    directory = Path(current)
+    report = inspect_interrupted_synthesis(project, directory)
+    if not report.items:
+        return
+    st.warning(
+        f"Se detectaron {report.affected_count} síntesis interrumpidas. "
+        "El proyecto sigue siendo editable."
+    )
+    proposed_labels = {
+        "mark_ready": "Recuperar WAV válido como listo",
+        "mark_stale": "Marcar como pendiente de regeneración",
+        "preserve_partial": "Conservar como .partial y marcar pendiente",
+    }
+    audio_labels = {
+        "valid": "válido",
+        "missing": "ausente",
+        "invalid": "inválido",
+        "mismatched": "no corresponde a la intervención",
+    }
+    with st.expander("Detalle de recuperación"):
+        for item in report.items:
+            st.write(
+                f"Intervención {item.order:02d} · WAV {audio_labels[item.audio_state]} · "
+                f"{proposed_labels[item.proposed_action]}"
+            )
+    if st.button(
+        "Recuperar síntesis interrumpida",
+        type="primary",
+        disabled=capabilities.has_active_synthesis,
+    ):
+        recovered = recover_interrupted_synthesis(project, directory)
+        if recovered.changed:
+            store.save(project, directory)
+            st.session_state.recovery_notice = (
+                f"Recuperación completada: {recovered.recovered_ready} WAV válidos y "
+                f"{recovered.converted_recoverable} pendientes."
+            )
+        st.rerun()
+
+
 def _model_options(
     project: DialogueProject, diagnostics: dict[str, object]
 ) -> tuple[list[str], dict[str, str]]:
@@ -422,12 +499,18 @@ def _model_options(
 def _test_voice(paths: AppPaths, model_id: str, speaker_name: str) -> None:
     destination = paths.temporary / f"voice-test-{uuid4().hex}.wav"
     with st.spinner(f"Probando la voz de {speaker_name}…"):
-        synthesize_text(
-            model_id,
-            f"Hola, soy {speaker_name}. Esta es una prueba de voz.",
+        run_with_synthesis_state(
+            GLOBAL_SYNTHESIS_COORDINATOR,
+            f"voice-test-{model_id}",
             destination,
-            paths.root,
-            probe=probe_audio,
+            st.session_state.session_token,
+            lambda: synthesize_text(
+                model_id,
+                f"Hola, soy {speaker_name}. Esta es una prueba de voz.",
+                destination,
+                paths.root,
+                probe=probe_audio,
+            ),
         )
     previous = st.session_state.preview_voice
     if previous:
@@ -509,7 +592,7 @@ def _render_speakers(
             ):
                 try:
                     _test_voice(paths, speaker.model_id, speaker.name)
-                except (OSError, ValueError, SpeechNoteError) as exc:
+                except (OSError, ValueError, SpeechNoteError, SynthesisBusyError) as exc:
                     st.error(str(exc))
             in_use = any(item.speaker_id == speaker.speaker_id for item in project.utterances)
             if actions[1].button(
@@ -567,8 +650,14 @@ def _run_generation(
     paths: AppPaths,
     utterance_ids: list[str],
 ) -> None:
-    if st.session_state.active_synthesis_id is not None:
-        st.warning("Ya hay un trabajo en curso")
+    active = GLOBAL_SYNTHESIS_COORDINATOR.active
+    if active is not None:
+        active_utterance = next(
+            (item for item in project.utterances if item.utterance_id == active.utterance_id),
+            None,
+        )
+        label = f" {active_utterance.order:02d}" if active_utterance else ""
+        st.info(f"Sintetizando intervención{label}…")
         return
     directory = _ensure_saved(store)
     progress = st.progress(0, text="Preparando síntesis…")
@@ -576,18 +665,33 @@ def _run_generation(
     try:
         total = len(utterance_ids)
         for index, utterance_id in enumerate(utterance_ids, start=1):
-            st.session_state.active_synthesis_id = utterance_id
             utterance = next(
                 item for item in project.utterances if item.utterance_id == utterance_id
             )
+            output_paths = prepare_generation_paths(directory, utterance, paths.root)
             voice = project.speaker(utterance.speaker_id)
             progress.progress(
                 (index - 1) / total,
                 text=f"Intervención {index} de {total} · {voice.name} · sintetizando",
             )
             try:
-                generate_utterance(project, directory, utterance_id, paths.root)
+                run_with_synthesis_state(
+                    GLOBAL_SYNTHESIS_COORDINATOR,
+                    utterance_id,
+                    output_paths.raw,
+                    st.session_state.session_token,
+                    lambda current_id=utterance_id, current_paths=output_paths: generate_utterance(
+                        project,
+                        directory,
+                        current_id,
+                        paths.root,
+                        output_paths=current_paths,
+                    ),
+                )
                 st.session_state.external_actions_enabled = True
+            except SynthesisBusyError:
+                failures += 1
+                st.info(f"Sintetizando intervención {utterance.order:02d}…")
             except (OSError, RuntimeError, ValueError) as exc:
                 failures += 1
                 if "invocación externa está deshabilitada" in str(exc).lower():
@@ -600,7 +704,7 @@ def _run_generation(
         if not failures:
             st.toast("Síntesis completada")
     finally:
-        st.session_state.active_synthesis_id = None
+        GLOBAL_SYNTHESIS_COORDINATOR.clear_abandoned()
 
 
 def _generate_one(
@@ -625,6 +729,9 @@ def _render_utterances(
     speaker_names = {speaker.speaker_id: speaker.name for speaker in project.speakers}
     directory = Path(st.session_state.project_dir) if st.session_state.project_dir else None
     for index, utterance in enumerate(list(project.utterances)):
+        utterance_capabilities, audio = _utterance_capabilities(
+            project, utterance, directory, capabilities
+        )
         speaker = project.speaker(utterance.speaker_id)
         color = COLORS.get(speaker.color_key, COLORS["accent"])
         with st.container(border=True, key=f"utterance-card-{utterance.utterance_id}"):
@@ -641,7 +748,7 @@ def _render_utterances(
                 index=speaker_ids.index(utterance.speaker_id),
                 format_func=lambda value: speaker_names[value],
                 key=f"utterance-speaker-{utterance.utterance_id}",
-                disabled=not capabilities.can_edit_project,
+                disabled=not utterance_capabilities.can_edit,
             )
             text = st.text_area(
                 "Texto",
@@ -649,7 +756,7 @@ def _render_utterances(
                 height=112,
                 placeholder="Escribe esta intervención…",
                 key=f"utterance-text-{utterance.utterance_id}",
-                disabled=not capabilities.can_edit_project,
+                disabled=not utterance_capabilities.can_edit,
             )
             if selected_speaker != utterance.speaker_id or text != utterance.text:
                 update_utterance(
@@ -661,8 +768,10 @@ def _render_utterances(
                 _reset_artifacts()
             if utterance.duration_seconds is not None:
                 st.caption(f"Duración · {utterance.duration_seconds:.2f} s")
-            if utterance.error_message:
-                st.error(utterance.error_message)
+            if capabilities.active_utterance_id == utterance.utterance_id:
+                st.info(f"Sintetizando intervención {utterance.order:02d}…")
+            elif utterance.status in {"error", "stale"}:
+                st.warning(RECOVERABLE_MESSAGE)
             utterance_capabilities, audio = _utterance_capabilities(
                 project, utterance, directory, capabilities
             )
@@ -670,7 +779,11 @@ def _render_utterances(
                 with st.expander("Escuchar"):
                     st.audio(str(audio), format="audio/wav")
             actions = st.columns([1.4, 0.75, 0.75, 0.75, 0.85])
-            generate_label = "Regenerar" if utterance.audio_relative_path else "Generar"
+            generate_label = (
+                "Regenerar"
+                if utterance.audio_relative_path or utterance.status in {"ready", "stale", "error"}
+                else "Generar"
+            )
             if actions[0].button(
                 generate_label,
                 key=f"generate-{utterance.utterance_id}",
@@ -780,7 +893,7 @@ def _render_global_actions(
             not master_exists
             or not st.session_state.get("enable_mp3", bool(diagnostics["ffmpeg"]))
             or not bool(diagnostics["ffmpeg"])
-            or capabilities.is_busy
+            or capabilities.has_active_synthesis
         ),
         use_container_width=True,
     ):
@@ -870,6 +983,7 @@ def main() -> None:
     capabilities = _project_capabilities(project, diagnostics, project_dir)
     _render_sidebar(paths, store, diagnostics, capabilities)
     _render_header(project, capabilities)
+    _render_recovery(project, store, capabilities)
     st.divider()
     _render_speakers(project, paths, diagnostics, capabilities)
     st.divider()

@@ -8,7 +8,9 @@ from streamlit.testing.v1 import AppTest
 import dialogue_studio.ui as ui
 from dialogue_studio.audio import AudioInfo
 from dialogue_studio.paths import AppPaths
+from dialogue_studio.recovery import LEGACY_BUSY_MESSAGE
 from dialogue_studio.speechnote import TTSModel
+from dialogue_studio.synthesis import SynthesisCoordinator
 
 
 def _button(app: AppTest, label: str, occurrence: int = 0):
@@ -44,7 +46,7 @@ def test_app_loads_sample_edits_adds_and_reorders_without_synthesis(
     monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
     monkeypatch.setattr(ui, "system_diagnostics", lambda: diagnostics)
 
-    def fake_generate(project, project_dir, utterance_id, controlled_root):
+    def fake_generate(project, project_dir, utterance_id, controlled_root, **kwargs):
         calls.append(utterance_id)
         utterance = next(item for item in project.utterances if item.utterance_id == utterance_id)
         utterance.status = "ready"
@@ -172,6 +174,84 @@ def test_ready_audio_plays_then_text_edit_marks_it_stale(
     regenerate = _keyed(app.button, f"generate-{utterance.utterance_id}")
     assert regenerate.label == "Regenerar"
     assert not regenerate.disabled
+
+
+def test_error_and_stale_are_regenerable_without_showing_a_live_lock(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        ui.AppPaths,
+        "discover",
+        classmethod(lambda cls: AppPaths(tmp_path / "Music")),
+    )
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: _diagnostics(tts_available=True))
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    utterance = app.session_state.project.utterances[0]
+    _keyed(app.text_area, f"utterance-text-{utterance.utterance_id}").set_value("Texto").run()
+    utterance = app.session_state.project.utterances[0]
+    utterance.status = "error"
+    utterance.error_message = "Fallo anterior"
+    app.run()
+    regenerate = _keyed(app.button, f"generate-{utterance.utterance_id}")
+    assert regenerate.label == "Regenerar"
+    assert not regenerate.disabled
+    assert not any("síntesis en curso" in item.value.lower() for item in app.error)
+
+    utterance.status = "stale"
+    app.run()
+    regenerate = _keyed(app.button, f"generate-{utterance.utterance_id}")
+    assert not regenerate.disabled
+
+
+def test_manual_recovery_removes_persisted_busy_message(
+    monkeypatch, make_wav, tmp_path: Path
+) -> None:
+    paths = AppPaths(tmp_path / "Music")
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: _diagnostics(tts_available=False))
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    utterance = app.session_state.project.utterances[0]
+    _keyed(app.text_area, f"utterance-text-{utterance.utterance_id}").set_value("Texto").run()
+    _button(app, "Guardar proyecto").click().run()
+    directory = Path(app.session_state.project_dir)
+    relative = f"audio/normalized/001-{utterance.utterance_id}.wav"
+    make_wav(directory / relative)
+    utterance = app.session_state.project.utterances[0]
+    utterance.status = "error"
+    utterance.error_message = LEGACY_BUSY_MESSAGE
+    utterance.audio_relative_path = relative
+    app.run()
+
+    assert _button(app, "Recuperar síntesis interrumpida")
+    assert not any("ya hay una síntesis" in item.value.lower() for item in app.error)
+    _button(app, "Recuperar síntesis interrumpida").click().run()
+    assert app.session_state.project.utterances[0].status == "ready"
+    assert not [
+        button for button in app.button if button.label == "Recuperar síntesis interrumpida"
+    ]
+
+
+def test_only_real_active_synthesis_shows_busy_state(monkeypatch, tmp_path: Path) -> None:
+    paths = AppPaths(tmp_path / "Music")
+    coordinator = SynthesisCoordinator()
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: _diagnostics(tts_available=True))
+    monkeypatch.setattr(ui, "GLOBAL_SYNTHESIS_COORDINATOR", coordinator)
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    utterance = app.session_state.project.utterances[0]
+    active = coordinator.start(
+        utterance.utterance_id,
+        tmp_path / "active.wav",
+        "another-session",
+    )
+    try:
+        app.run()
+        assert any("Sintetizando intervención 01" in item.value for item in app.info)
+        assert _keyed(app.button, f"generate-{utterance.utterance_id}").disabled
+        assert _keyed(app.text_area, f"utterance-text-{utterance.utterance_id}").disabled
+        assert not _button(app, "＋ Añadir intervención").disabled
+    finally:
+        coordinator.clear(active.job_token)
 
 
 def test_move_boundaries_and_order_survive_rerun(monkeypatch, tmp_path: Path) -> None:
@@ -312,3 +392,37 @@ def test_generation_service_calls_synthesizer_once_and_keeps_old_preview_on_fail
         )
     assert utterance.status == "error"
     assert utterance.audio_relative_path == old_path
+
+
+def test_busy_error_does_not_overwrite_a_ready_utterance(make_wav, tmp_path: Path) -> None:
+    from dialogue_studio.models import DialogueProject
+    from dialogue_studio.service import generate_utterance
+    from dialogue_studio.synthesis import SynthesisBusyError
+
+    project = DialogueProject.new()
+    utterance = project.utterances[0]
+    utterance.text = "Texto"
+    utterance.status = "ready"
+    utterance.audio_relative_path = f"audio/normalized/{utterance.utterance_id}.wav"
+    utterance.duration_seconds = 0.1
+    utterance.sha256 = "old-hash"
+    project_dir = tmp_path / "project"
+    (project_dir / "audio" / "raw").mkdir(parents=True)
+    (project_dir / "audio" / "normalized").mkdir(parents=True)
+    make_wav(project_dir / utterance.audio_relative_path)
+
+    def busy(*args, **kwargs):
+        raise SynthesisBusyError("Hay una síntesis real activa")
+
+    with pytest.raises(SynthesisBusyError):
+        generate_utterance(
+            project,
+            project_dir,
+            utterance.utterance_id,
+            tmp_path,
+            synthesizer=busy,
+        )
+    assert utterance.status == "ready"
+    assert utterance.audio_relative_path.endswith(".wav")
+    assert utterance.duration_seconds == 0.1
+    assert utterance.sha256 == "old-hash"
