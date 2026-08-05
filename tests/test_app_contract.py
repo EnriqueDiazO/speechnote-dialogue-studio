@@ -21,7 +21,9 @@ def _keyed(elements, key: str):
     return next(element for element in elements if element.key == key)
 
 
-def _diagnostics(*, tts_available: bool) -> dict[str, object]:
+def _diagnostics(
+    *, tts_available: bool, qwen_available: bool = False
+) -> dict[str, object]:
     return {
         "flatpak": tts_available,
         "installed": tts_available,
@@ -34,6 +36,36 @@ def _diagnostics(*, tts_available: bool) -> dict[str, object]:
         ],
         "active": None,
         "error": None if tts_available else "Speech Note no está disponible",
+        "qwen": {
+            "ok": qwen_available,
+            "state": "idle" if qwen_available else "offline",
+            "model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+            "gpu": "Fake RTX" if qwen_available else None,
+            "model_loaded": qwen_available,
+            "vram_free_bytes": 4 * 1024**3 if qwen_available else None,
+            "vram_total_bytes": 8 * 1024**3 if qwen_available else None,
+            "supports_instruct": False,
+        },
+        "qwen_capabilities": {
+            "speakers": [
+                "aiden",
+                "dylan",
+                "eric",
+                "ono_anna",
+                "ryan",
+                "serena",
+                "sohee",
+                "uncle_fu",
+                "vivian",
+            ],
+            "languages": ["auto", "english", "spanish"],
+            "supports_instruct": False,
+            "supports_voice_design": False,
+            "supports_voice_cloning": False,
+            "supports_sampling_controls": True,
+            "supports_speaker_selection": True,
+            "supports_language_selection": True,
+        },
     }
 
 
@@ -426,3 +458,80 @@ def test_busy_error_does_not_overwrite_a_ready_utterance(make_wav, tmp_path: Pat
     assert utterance.audio_relative_path.endswith(".wav")
     assert utterance.duration_seconds == 0.1
     assert utterance.sha256 == "old-hash"
+
+
+def test_qwen_character_menu_exposes_real_capabilities_without_expression_controls(
+    monkeypatch, tmp_path: Path
+) -> None:
+    paths = AppPaths(tmp_path / "Music")
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(
+        ui,
+        "system_diagnostics",
+        lambda: _diagnostics(tts_available=False, qwen_available=True),
+    )
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    speaker = app.session_state.project.speakers[0]
+    _keyed(app.selectbox, f"speaker-provider-{speaker.speaker_id}").select("qwen").run()
+
+    speaker = app.session_state.project.speakers[0]
+    assert speaker.tts_config.provider == "qwen"
+    voice = _keyed(app.selectbox, f"speaker-voice-{speaker.speaker_id}")
+    assert voice.options == [
+        "Aiden",
+        "Dylan",
+        "Eric",
+        "Ono Anna",
+        "Ryan",
+        "Serena",
+        "Sohee",
+        "Uncle Fu",
+        "Vivian",
+    ]
+    assert _keyed(app.selectbox, f"speaker-language-{speaker.speaker_id}").value == "spanish"
+    assert any(item.label == "Temperatura" for item in app.number_input)
+    active_labels = {
+        item.label
+        for collection in (app.selectbox, app.number_input, app.slider, app.text_area)
+        for item in collection
+    }
+    assert not {"Emoción", "Estilo", "Ritmo", "Intensidad", "Pausas", "Claridad"} & active_labels
+    assert any("no admite instrucciones" in item.value.lower() for item in app.info)
+
+
+def test_qwen_sampling_and_utterance_override_persist_and_mark_stale(
+    monkeypatch, tmp_path: Path
+) -> None:
+    paths = AppPaths(tmp_path / "Music")
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(
+        ui,
+        "system_diagnostics",
+        lambda: _diagnostics(tts_available=True, qwen_available=True),
+    )
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    speaker = app.session_state.project.speakers[0]
+    utterance = app.session_state.project.utterances[0]
+    _keyed(app.selectbox, f"speaker-provider-{speaker.speaker_id}").select("qwen").run()
+    speaker = app.session_state.project.speakers[0]
+    utterance = app.session_state.project.utterances[0]
+    utterance.status = "ready"
+    utterance.audio_relative_path = f"audio/normalized/{utterance.utterance_id}.wav"
+    _keyed(app.selectbox, f"speaker-voice-{speaker.speaker_id}").select("serena").run()
+    _keyed(app.number_input, f"speaker-qwen-{speaker.speaker_id}-temperature").set_value(
+        0.7
+    ).run()
+    assert speaker.tts_config.voice_id == "serena"
+    assert speaker.tts_config.generation_options["temperature"] == 0.7
+    assert utterance.status == "stale"
+
+    override_toggle = _keyed(
+        app.checkbox, f"utterance-override-enabled-{utterance.utterance_id}"
+    )
+    override_toggle.check().run()
+    _keyed(app.selectbox, f"utterance-qwen-voice-{utterance.utterance_id}").select(
+        "vivian"
+    ).run()
+    assert utterance.tts_override is not None
+    assert utterance.tts_override.provider == "qwen"
+    assert utterance.tts_override.voice_id == "vivian"

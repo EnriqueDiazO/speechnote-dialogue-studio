@@ -11,8 +11,22 @@ import streamlit as st
 
 from .audio import export_mp3, has_ffmpeg, probe_audio
 from .export import export_project_zip
-from .models import DialogueProject, Utterance
+from .models import (
+    DialogueProject,
+    SpeakerProfile,
+    SpeakerTTSConfig,
+    Utterance,
+    UtteranceTTSOverride,
+    effective_tts_config,
+)
 from .paths import AppPaths
+from .qwen_client import QwenBackendManager, QwenClient, QwenClientError
+from .qwen_service import (
+    DEFAULT_GENERATION_OPTIONS,
+    DEFAULT_MODEL,
+    FALLBACK_LANGUAGES,
+    FALLBACK_SPEAKERS,
+)
 from .recovery import (
     RECOVERABLE_MESSAGE,
     inspect_interrupted_synthesis,
@@ -30,8 +44,10 @@ from .service import (
     project_metrics,
     remove_speaker,
     update_speaker_name,
+    update_speaker_tts,
     update_speaker_voice,
     update_utterance,
+    update_utterance_tts_override,
 )
 from .speechnote import (
     SpeechNoteError,
@@ -77,6 +93,8 @@ class ProjectCapabilities:
     can_export_project: bool
     has_active_synthesis: bool
     active_utterance_id: str | None
+    speechnote_available: bool
+    qwen_available: bool
 
 
 @dataclass(frozen=True)
@@ -132,6 +150,24 @@ def system_diagnostics() -> dict[str, object]:
         "models": [],
         "active": None,
         "error": None,
+        "qwen": {
+            "ok": False,
+            "state": "offline",
+            "model": DEFAULT_MODEL,
+            "last_error": None,
+        },
+        "qwen_capabilities": {
+            "speakers": list(FALLBACK_SPEAKERS),
+            "languages": list(FALLBACK_LANGUAGES),
+            "source": "verified_fallback",
+            "supports_instruct": False,
+            "supports_voice_design": False,
+            "supports_voice_cloning": False,
+            "supports_sampling_controls": True,
+            "supports_speaker_selection": True,
+            "supports_language_selection": True,
+            "defaults": dict(DEFAULT_GENERATION_OPTIONS),
+        },
     }
     try:
         data["flatpak"] = check_flatpak()
@@ -143,6 +179,12 @@ def system_diagnostics() -> dict[str, object]:
                 data["active"] = get_active_tts_model()
     except (RuntimeError, SpeechNoteError) as exc:
         data["error"] = str(exc)
+    qwen = QwenClient()
+    try:
+        data["qwen"] = qwen.health()
+        data["qwen_capabilities"] = qwen.capabilities()
+    except (QwenClientError, ValueError):
+        pass
     return data
 
 
@@ -217,6 +259,12 @@ def _utterance_capabilities(
     capabilities: ProjectCapabilities,
 ) -> tuple[UtteranceCapabilities, Path | None]:
     audio = _valid_ready_audio(project_dir, utterance)
+    tts = effective_tts_config(project, utterance)
+    provider_available = (
+        capabilities.qwen_available
+        if tts.provider == "qwen"
+        else capabilities.speechnote_available
+    )
     return (
         UtteranceCapabilities(
             can_edit=(
@@ -225,8 +273,9 @@ def _utterance_capabilities(
             ),
             can_synthesize=(
                 capabilities.can_synthesize
+                and provider_available
                 and bool(utterance.text.strip())
-                and bool(project.speaker(utterance.speaker_id).model_id)
+                and bool(tts.voice_id)
             ),
             can_play=audio is not None,
         ),
@@ -247,16 +296,21 @@ def _project_capabilities(
     tts_available = (
         bool(diagnostics["installed"]) and bool(diagnostics["open"]) and external_state is not False
     )
+    qwen_status = diagnostics.get("qwen", {})
+    qwen_state = qwen_status.get("state", "offline") if isinstance(qwen_status, dict) else "offline"
+    qwen_available = qwen_state in {"idle", "error"}
     playable = [
         _valid_ready_audio(project_dir, utterance) is not None for utterance in project.utterances
     ]
     return ProjectCapabilities(
         can_edit_project=True,
-        can_synthesize=tts_available and not has_active_synthesis,
+        can_synthesize=(tts_available or qwen_available) and not has_active_synthesis,
         can_build_master=(bool(playable) and all(playable) and not has_active_synthesis),
         can_export_project=bool(project.utterances),
         has_active_synthesis=has_active_synthesis,
         active_utterance_id=active.utterance_id if active else None,
+        speechnote_available=tts_available,
+        qwen_available=qwen_available,
     )
 
 
@@ -434,6 +488,92 @@ def _render_header(project: DialogueProject, capabilities: ProjectCapabilities) 
     columns[3].metric("Pendientes", metrics["pending"])
 
 
+def _clear_diagnostics_cache() -> None:
+    clear = getattr(system_diagnostics, "clear", None)
+    if callable(clear):
+        clear()
+
+
+def _gib(value: object) -> str:
+    return f"{int(value) / (1024**3):.1f} GiB" if isinstance(value, int) else "—"
+
+
+def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> None:
+    raw_status = diagnostics.get("qwen", {})
+    status = raw_status if isinstance(raw_status, dict) else {}
+    raw_capabilities = diagnostics.get("qwen_capabilities", {})
+    qwen_capabilities = raw_capabilities if isinstance(raw_capabilities, dict) else {}
+    state = str(status.get("state", "offline"))
+    state_labels = {
+        "offline": "Apagado",
+        "starting": "Iniciando",
+        "idle": "Disponible",
+        "loading_model": "Cargando modelo",
+        "generating": "Generando",
+        "error": "Error",
+    }
+    with st.expander("Backend Qwen3-TTS", expanded=state != "offline"):
+        summary = st.columns(4)
+        summary[0].metric("Estado", state_labels.get(state, state))
+        summary[1].metric("GPU", str(status.get("gpu") or "—"))
+        summary[2].metric("VRAM libre", _gib(status.get("vram_free_bytes")))
+        summary[3].metric("VRAM total", _gib(status.get("vram_total_bytes")))
+        st.caption(
+            f"Modelo · {status.get('model', DEFAULT_MODEL)}  |  "
+            f"Torch · {status.get('torch', '—')}  |  CUDA · {status.get('cuda_version', '—')}  |  "
+            f"BF16 · {'sí' if status.get('bf16') else '—'}  |  "
+            f"dtype · {status.get('dtype', 'bfloat16')}  |  "
+            f"atención · {status.get('attention', 'sdpa')}  |  salida · 24000 Hz"
+        )
+        speakers = qwen_capabilities.get("speakers", FALLBACK_SPEAKERS)
+        languages = qwen_capabilities.get("languages", FALLBACK_LANGUAGES)
+        st.caption(f"Voces · {len(speakers)}  |  Idiomas · {len(languages)}")
+        st.info(
+            "El modelo 0.6B permite elegir voz, idioma y sampling. No admite instrucciones "
+            "emocionales, VoiceDesign ni clonación de voz; esos controles permanecen ocultos."
+        )
+        if status.get("last_error"):
+            st.error(str(status["last_error"]))
+        controls = st.columns(4)
+        manager = QwenBackendManager(paths)
+        if controls[0].button(
+            "Iniciar backend Qwen",
+            disabled=state != "offline",
+            use_container_width=True,
+        ):
+            try:
+                manager.start()
+                _clear_diagnostics_cache()
+                st.rerun()
+            except (OSError, ValueError, QwenClientError) as exc:
+                st.error(str(exc))
+        if controls[1].button("Actualizar estado", use_container_width=True):
+            _clear_diagnostics_cache()
+            st.rerun()
+        if controls[2].button(
+            "Descargar modelo de GPU",
+            disabled=state == "offline" or not bool(status.get("model_loaded")),
+            use_container_width=True,
+        ):
+            try:
+                manager.client.unload()
+                _clear_diagnostics_cache()
+                st.rerun()
+            except QwenClientError as exc:
+                st.error(str(exc))
+        if controls[3].button(
+            "Detener backend",
+            disabled=state == "offline",
+            use_container_width=True,
+        ):
+            try:
+                manager.stop()
+                _clear_diagnostics_cache()
+                st.rerun()
+            except (OSError, QwenClientError) as exc:
+                st.error(str(exc))
+
+
 def _render_recovery(
     project: DialogueProject,
     store: ProjectStore,
@@ -492,27 +632,177 @@ def _model_options(
     models = list(diagnostics["models"])
     labels = {model.model_id: model.label for model in models}
     for speaker in project.speakers:
-        if speaker.model_id and speaker.model_id not in labels:
-            labels[speaker.model_id] = speaker.model_label or speaker.model_id
+        config = speaker.tts_config
+        if (
+            config.provider == "speechnote"
+            and config.voice_id
+            and config.voice_id not in labels
+        ):
+            labels[config.voice_id] = config.voice_label or config.voice_id
     return list(labels), labels
 
 
-def _test_voice(paths: AppPaths, model_id: str, speaker_name: str) -> None:
+QWEN_VOICE_LABELS = {
+    "aiden": "Aiden",
+    "dylan": "Dylan",
+    "eric": "Eric",
+    "ono_anna": "Ono Anna",
+    "ryan": "Ryan",
+    "serena": "Serena",
+    "sohee": "Sohee",
+    "uncle_fu": "Uncle Fu",
+    "vivian": "Vivian",
+}
+QWEN_LANGUAGE_LABELS = {
+    "auto": "Automático",
+    "chinese": "Chino",
+    "english": "Inglés",
+    "french": "Francés",
+    "german": "Alemán",
+    "italian": "Italiano",
+    "japanese": "Japonés",
+    "korean": "Coreano",
+    "portuguese": "Portugués",
+    "russian": "Ruso",
+    "spanish": "Español",
+}
+PROVIDER_LABELS = {"speechnote": "Speech Note", "qwen": "Qwen3-TTS"}
+
+
+def _qwen_options(diagnostics: dict[str, object]) -> tuple[list[str], list[str]]:
+    raw = diagnostics.get("qwen_capabilities", {})
+    capabilities = raw if isinstance(raw, dict) else {}
+    speakers = [str(value).lower() for value in capabilities.get("speakers", FALLBACK_SPEAKERS)]
+    languages = [str(value).lower() for value in capabilities.get("languages", FALLBACK_LANGUAGES)]
+    return speakers or list(FALLBACK_SPEAKERS), languages or list(FALLBACK_LANGUAGES)
+
+
+def _qwen_defaults(config: SpeakerTTSConfig) -> dict[str, int | float]:
+    options = dict(DEFAULT_GENERATION_OPTIONS)
+    options.update(config.generation_options)
+    return options
+
+
+def _sampling_controls(
+    config: SpeakerTTSConfig,
+    *,
+    key_prefix: str,
+    disabled: bool,
+) -> tuple[dict[str, int | float], bool]:
+    reset_marker = f"{key_prefix}-reset-pending"
+    suffixes = ("seed", "max-new-tokens", "temperature", "top-p", "top-k", "repetition")
+    if st.session_state.pop(reset_marker, False):
+        for suffix in suffixes:
+            st.session_state.pop(f"{key_prefix}-{suffix}", None)
+    values = _qwen_defaults(config)
+    seed = st.number_input(
+        "Semilla",
+        min_value=0,
+        max_value=4_294_967_295,
+        value=int(values["seed"]),
+        step=1,
+        key=f"{key_prefix}-seed",
+        disabled=disabled,
+        help="Se aplica dentro de un contexto Torch que restaura el RNG al terminar.",
+    )
+    max_tokens = st.number_input(
+        "Máximo de tokens",
+        min_value=64,
+        max_value=8192,
+        value=int(values["max_new_tokens"]),
+        step=64,
+        key=f"{key_prefix}-max-new-tokens",
+        disabled=disabled,
+    )
+    columns = st.columns(2)
+    temperature = columns[0].number_input(
+        "Temperatura",
+        min_value=0.1,
+        max_value=2.0,
+        value=float(values["temperature"]),
+        step=0.05,
+        key=f"{key_prefix}-temperature",
+        disabled=disabled,
+    )
+    top_p = columns[1].number_input(
+        "Top-p",
+        min_value=0.1,
+        max_value=1.0,
+        value=float(values["top_p"]),
+        step=0.05,
+        key=f"{key_prefix}-top-p",
+        disabled=disabled,
+    )
+    top_k = columns[0].number_input(
+        "Top-k",
+        min_value=1,
+        max_value=200,
+        value=int(values["top_k"]),
+        step=1,
+        key=f"{key_prefix}-top-k",
+        disabled=disabled,
+    )
+    repetition = columns[1].number_input(
+        "Penalización de repetición",
+        min_value=0.8,
+        max_value=2.0,
+        value=float(values["repetition_penalty"]),
+        step=0.05,
+        key=f"{key_prefix}-repetition",
+        disabled=disabled,
+    )
+    reset = st.button(
+        "Restablecer opciones",
+        key=f"{key_prefix}-reset",
+        disabled=disabled,
+    )
+    if reset:
+        st.session_state[reset_marker] = True
+    return (
+        dict(DEFAULT_GENERATION_OPTIONS)
+        if reset
+        else {
+            "seed": int(seed),
+            "max_new_tokens": int(max_tokens),
+            "temperature": float(temperature),
+            "top_p": float(top_p),
+            "top_k": int(top_k),
+            "repetition_penalty": float(repetition),
+        },
+        reset,
+    )
+
+
+def _test_voice(paths: AppPaths, speaker: SpeakerProfile) -> None:
+    config = speaker.tts_config
     destination = paths.temporary / f"voice-test-{uuid4().hex}.wav"
-    with st.spinner(f"Probando la voz de {speaker_name}…"):
+    with st.spinner(f"Probando la voz de {speaker.name}…"):
+        if config.provider == "qwen":
+            def action() -> object:
+                return QwenClient().synthesize(
+                    text=f"Hola, soy {speaker.name}. Esta es una prueba de voz.",
+                    speaker=config.voice_id,
+                    language=config.language,
+                    generation_options=_qwen_defaults(config),
+                    output_path=destination,
+                )
+        else:
+            def action() -> object:
+                return synthesize_text(
+                    config.voice_id,
+                    f"Hola, soy {speaker.name}. Esta es una prueba de voz.",
+                    destination,
+                    paths.root,
+                    probe=probe_audio,
+                )
         run_with_synthesis_state(
             GLOBAL_SYNTHESIS_COORDINATOR,
-            f"voice-test-{model_id}",
+            f"voice-test-{config.provider}-{config.voice_id}",
             destination,
             st.session_state.session_token,
-            lambda: synthesize_text(
-                model_id,
-                f"Hola, soy {speaker_name}. Esta es una prueba de voz.",
-                destination,
-                paths.root,
-                probe=probe_audio,
-            ),
+            action,
         )
+        probe_audio(destination)
     previous = st.session_state.preview_voice
     if previous:
         previous_path = Path(previous)
@@ -534,15 +824,17 @@ def _render_speakers(
 ) -> None:
     st.markdown("## Hablantes")
     st.caption("Cada voz se aplica a todas las intervenciones de ese hablante.")
-    options, labels = _model_options(project, diagnostics)
+    speech_options, speech_labels = _model_options(project, diagnostics)
+    qwen_voices, qwen_languages = _qwen_options(diagnostics)
     for speaker in list(project.speakers):
+        config = speaker.tts_config
         color = COLORS.get(speaker.color_key, COLORS["accent"])
         with st.container(border=True, key=f"speaker-card-{speaker.speaker_id}"):
             st.markdown(
                 f'<div class="speaker-rule" style="background:{color}"></div>',
                 unsafe_allow_html=True,
             )
-            columns = st.columns([1.1, 2.2, 0.8])
+            columns = st.columns([1.1, 1.1, 0.8])
             name = columns[0].text_input(
                 "Nombre",
                 speaker.name,
@@ -552,28 +844,33 @@ def _render_speakers(
             if name.strip() and name != speaker.name:
                 update_speaker_name(project, speaker.speaker_id, name)
                 _reset_artifacts()
-            if options:
-                current_index = (
-                    options.index(speaker.model_id) if speaker.model_id in options else 0
-                )
-                voice = columns[1].selectbox(
-                    "Voz",
-                    options,
-                    index=current_index,
-                    format_func=lambda model_id: labels[model_id],
-                    key=f"speaker-voice-{speaker.speaker_id}",
-                    disabled=not capabilities.can_edit_project,
-                )
-                if voice != speaker.model_id:
-                    update_speaker_voice(project, speaker.speaker_id, voice, labels[voice])
-                    _reset_artifacts()
-            else:
-                columns[1].text_input(
-                    "ID de voz",
-                    speaker.model_id,
-                    disabled=True,
-                    help="Actualiza el diagnóstico para cargar las voces disponibles.",
-                )
+            provider = columns[1].selectbox(
+                "Motor de voz",
+                list(PROVIDER_LABELS),
+                index=list(PROVIDER_LABELS).index(config.provider),
+                format_func=lambda value: PROVIDER_LABELS[value],
+                key=f"speaker-provider-{speaker.speaker_id}",
+                disabled=not capabilities.can_edit_project,
+            )
+            if provider != config.provider:
+                if provider == "qwen":
+                    replacement = SpeakerTTSConfig(
+                        provider="qwen",
+                        voice_id=qwen_voices[0],
+                        voice_label=QWEN_VOICE_LABELS.get(qwen_voices[0], qwen_voices[0]),
+                        language="spanish" if project.language.startswith("es") else "auto",
+                        generation_options=dict(DEFAULT_GENERATION_OPTIONS),
+                    )
+                else:
+                    voice_id = speech_options[0] if speech_options else ""
+                    replacement = SpeakerTTSConfig(
+                        provider="speechnote",
+                        voice_id=voice_id,
+                        voice_label=speech_labels.get(voice_id, voice_id),
+                    )
+                update_speaker_tts(project, speaker.speaker_id, replacement)
+                _reset_artifacts()
+                st.rerun()
             color_key = columns[2].selectbox(
                 "Color",
                 list(COLORS),
@@ -585,15 +882,100 @@ def _render_speakers(
             if color_key != speaker.color_key:
                 speaker.color_key = color_key
                 project.touch()
+
+            if config.provider == "qwen":
+                voice_id = config.voice_id if config.voice_id in qwen_voices else qwen_voices[0]
+                voice = st.selectbox(
+                    "Voz",
+                    qwen_voices,
+                    index=qwen_voices.index(voice_id),
+                    format_func=lambda value: QWEN_VOICE_LABELS.get(value, value),
+                    key=f"speaker-voice-{speaker.speaker_id}",
+                    disabled=not capabilities.can_edit_project,
+                )
+                language_id = (
+                    config.language if config.language in qwen_languages else qwen_languages[0]
+                )
+                language = st.selectbox(
+                    "Idioma",
+                    qwen_languages,
+                    index=qwen_languages.index(language_id),
+                    format_func=lambda value: QWEN_LANGUAGE_LABELS.get(value, value.title()),
+                    key=f"speaker-language-{speaker.speaker_id}",
+                    disabled=not capabilities.can_edit_project,
+                )
+                st.caption(
+                    "Qwen 0.6B no admite instrucciones emocionales; sólo se envían voz, "
+                    "idioma y opciones de sampling confirmadas."
+                )
+                with st.expander("Opciones avanzadas de generación"):
+                    generation_options, reset = _sampling_controls(
+                        config,
+                        key_prefix=f"speaker-qwen-{speaker.speaker_id}",
+                        disabled=not capabilities.can_edit_project,
+                    )
+                updated = SpeakerTTSConfig(
+                    provider="qwen",
+                    voice_id=voice,
+                    voice_label=QWEN_VOICE_LABELS.get(voice, voice),
+                    language=language,
+                    generation_options=generation_options,
+                )
+                if updated != config:
+                    update_speaker_tts(project, speaker.speaker_id, updated)
+                    _reset_artifacts()
+                    if reset:
+                        st.rerun()
+            else:
+                if speech_options:
+                    current = (
+                        config.voice_id if config.voice_id in speech_options else speech_options[0]
+                    )
+                    voice = st.selectbox(
+                        "Voz",
+                        speech_options,
+                        index=speech_options.index(current),
+                        format_func=lambda value: speech_labels[value],
+                        key=f"speaker-voice-{speaker.speaker_id}",
+                        disabled=not capabilities.can_edit_project,
+                    )
+                    if voice != config.voice_id:
+                        update_speaker_voice(
+                            project, speaker.speaker_id, voice, speech_labels[voice]
+                        )
+                        _reset_artifacts()
+                else:
+                    st.text_input(
+                        "ID de voz",
+                        config.voice_id,
+                        disabled=True,
+                        help="Abre Speech Note y actualiza el diagnóstico.",
+                    )
             actions = st.columns([1, 1, 3])
+            provider_available = (
+                capabilities.qwen_available
+                if config.provider == "qwen"
+                else capabilities.speechnote_available
+            )
             if actions[0].button(
                 "Probar voz",
                 key=f"test-voice-{speaker.speaker_id}",
-                disabled=not speaker.model_id or not capabilities.can_synthesize,
+                disabled=(
+                    not config.voice_id
+                    or not provider_available
+                    or capabilities.has_active_synthesis
+                ),
             ):
                 try:
-                    _test_voice(paths, speaker.model_id, speaker.name)
-                except (OSError, ValueError, SpeechNoteError, SynthesisBusyError) as exc:
+                    _test_voice(paths, speaker)
+                    _clear_diagnostics_cache()
+                except (
+                    OSError,
+                    ValueError,
+                    SpeechNoteError,
+                    QwenClientError,
+                    SynthesisBusyError,
+                ) as exc:
                     st.error(str(exc))
             in_use = any(item.speaker_id == speaker.speaker_id for item in project.utterances)
             if actions[1].button(
@@ -612,19 +994,58 @@ def _render_speakers(
         st.caption("Última prueba de voz")
         st.audio(preview, format="audio/wav")
 
-    with st.expander("Añadir hablante"), st.form("add-speaker-form", clear_on_submit=True):
+    with st.expander("Añadir hablante"):
         name = st.text_input(
             "Nombre",
             placeholder="Narradora",
+            key="new-speaker-name",
             disabled=not capabilities.can_edit_project,
         )
-        default_voice = options[0] if options else ""
-        model_id = st.selectbox(
-            "Voz",
-            options or [""],
-            format_func=lambda value: labels.get(value, "Sin voces detectadas"),
+        new_provider = st.selectbox(
+            "Motor de voz",
+            list(PROVIDER_LABELS),
+            format_func=lambda value: PROVIDER_LABELS[value],
+            key="new-speaker-provider",
             disabled=not capabilities.can_edit_project,
         )
+        if new_provider == "qwen":
+            new_voice = st.selectbox(
+                "Voz Qwen",
+                qwen_voices,
+                format_func=lambda value: QWEN_VOICE_LABELS.get(value, value),
+                key="new-speaker-qwen-voice",
+                disabled=not capabilities.can_edit_project,
+            )
+            new_language = st.selectbox(
+                "Idioma Qwen",
+                qwen_languages,
+                index=(
+                    qwen_languages.index("spanish") if "spanish" in qwen_languages else 0
+                ),
+                format_func=lambda value: QWEN_LANGUAGE_LABELS.get(value, value.title()),
+                key="new-speaker-qwen-language",
+                disabled=not capabilities.can_edit_project,
+            )
+            new_tts = SpeakerTTSConfig(
+                provider="qwen",
+                voice_id=new_voice,
+                voice_label=QWEN_VOICE_LABELS.get(new_voice, new_voice),
+                language=new_language,
+                generation_options=dict(DEFAULT_GENERATION_OPTIONS),
+            )
+        else:
+            new_voice = st.selectbox(
+                "Voz Speech Note",
+                speech_options or [""],
+                format_func=lambda value: speech_labels.get(value, "Sin voces detectadas"),
+                key="new-speaker-speechnote-voice",
+                disabled=not capabilities.can_edit_project,
+            )
+            new_tts = SpeakerTTSConfig(
+                provider="speechnote",
+                voice_id=new_voice,
+                voice_label=speech_labels.get(new_voice, new_voice),
+            )
         color = st.selectbox(
             "Color",
             list(COLORS),
@@ -632,16 +1053,23 @@ def _render_speakers(
             format_func=lambda value: value.capitalize(),
             disabled=not capabilities.can_edit_project,
         )
-        if st.form_submit_button(
+        if st.button(
             "Crear hablante",
             type="primary",
+            key="create-speaker",
             disabled=not capabilities.can_edit_project,
         ):
             if not name.strip():
                 st.error("Escribe un nombre para el hablante")
             else:
-                voice = model_id or default_voice
-                add_speaker(project, name, voice, labels.get(voice, voice), color)
+                add_speaker(
+                    project,
+                    name,
+                    new_tts.voice_id,
+                    new_tts.voice_label,
+                    color,
+                    tts=new_tts,
+                )
                 st.rerun()
 
 
@@ -717,6 +1145,107 @@ def _generate_one(
     _run_generation(project, store, paths, [utterance_id])
 
 
+def _render_utterance_tts_override(
+    project: DialogueProject,
+    utterance: Utterance,
+    diagnostics: dict[str, object],
+    *,
+    disabled: bool,
+) -> None:
+    speech_options, speech_labels = _model_options(project, diagnostics)
+    qwen_voices, qwen_languages = _qwen_options(diagnostics)
+    existing = utterance.tts_override
+    enabled = st.checkbox(
+        "Usar configuración de voz específica",
+        value=existing is not None,
+        key=f"utterance-override-enabled-{utterance.utterance_id}",
+        disabled=disabled,
+    )
+    if enabled != (existing is not None):
+        if enabled:
+            base = project.speaker(utterance.speaker_id).tts_config
+            replacement = UtteranceTTSOverride(
+                provider=base.provider,
+                voice_id=base.voice_id,
+                language=base.language,
+                generation_options=dict(base.generation_options),
+            )
+        else:
+            replacement = None
+        update_utterance_tts_override(project, utterance.utterance_id, replacement)
+        _reset_artifacts()
+        st.rerun()
+    if not enabled or existing is None:
+        return
+
+    effective = effective_tts_config(project, utterance)
+    provider = st.selectbox(
+        "Motor de voz para esta intervención",
+        list(PROVIDER_LABELS),
+        index=list(PROVIDER_LABELS).index(effective.provider),
+        format_func=lambda value: PROVIDER_LABELS[value],
+        key=f"utterance-provider-{utterance.utterance_id}",
+        disabled=disabled,
+    )
+    if provider == "qwen":
+        current_voice = (
+            effective.voice_id if effective.voice_id in qwen_voices else qwen_voices[0]
+        )
+        voice = st.selectbox(
+            "Voz Qwen para esta intervención",
+            qwen_voices,
+            index=qwen_voices.index(current_voice),
+            format_func=lambda value: QWEN_VOICE_LABELS.get(value, value),
+            key=f"utterance-qwen-voice-{utterance.utterance_id}",
+            disabled=disabled,
+        )
+        current_language = (
+            effective.language if effective.language in qwen_languages else qwen_languages[0]
+        )
+        language = st.selectbox(
+            "Idioma Qwen para esta intervención",
+            qwen_languages,
+            index=qwen_languages.index(current_language),
+            format_func=lambda value: QWEN_LANGUAGE_LABELS.get(value, value.title()),
+            key=f"utterance-qwen-language-{utterance.utterance_id}",
+            disabled=disabled,
+        )
+        st.caption("El modelo 0.6B no admite un override de instrucción emocional.")
+        with st.expander("Opciones avanzadas del override"):
+            options, reset = _sampling_controls(
+                effective,
+                key_prefix=f"utterance-qwen-{utterance.utterance_id}",
+                disabled=disabled,
+            )
+    else:
+        current_voice = (
+            effective.voice_id if effective.voice_id in speech_options else ""
+        )
+        choices = speech_options or [current_voice]
+        voice = st.selectbox(
+            "Voz Speech Note para esta intervención",
+            choices,
+            index=choices.index(current_voice) if current_voice in choices else 0,
+            format_func=lambda value: speech_labels.get(value, value or "Sin voz detectada"),
+            key=f"utterance-speechnote-voice-{utterance.utterance_id}",
+            disabled=disabled,
+        )
+        language = "auto"
+        options = {}
+        reset = False
+    updated = UtteranceTTSOverride(
+        provider=provider,
+        voice_id=voice,
+        language=language,
+        generation_options=options,
+    )
+    if updated != existing:
+        update_utterance_tts_override(project, utterance.utterance_id, updated)
+        _reset_artifacts()
+        if reset:
+            st.rerun()
+
+
 def _render_utterances(
     project: DialogueProject,
     store: ProjectStore,
@@ -767,6 +1296,13 @@ def _render_utterances(
                     speaker_id=selected_speaker,
                 )
                 _reset_artifacts()
+            with st.expander("Override de voz"):
+                _render_utterance_tts_override(
+                    project,
+                    utterance,
+                    diagnostics,
+                    disabled=not utterance_capabilities.can_edit,
+                )
             if utterance.duration_seconds is not None:
                 st.caption(f"Duración · {utterance.duration_seconds:.2f} s")
             if capabilities.active_utterance_id == utterance.utterance_id:
@@ -984,6 +1520,7 @@ def main() -> None:
     capabilities = _project_capabilities(project, diagnostics, project_dir)
     _render_sidebar(paths, store, diagnostics, capabilities)
     _render_header(project, capabilities)
+    _render_qwen_backend(paths, diagnostics)
     _render_recovery(project, store, capabilities)
     st.divider()
     _render_speakers(project, paths, diagnostics, capabilities)
