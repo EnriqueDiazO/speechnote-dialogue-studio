@@ -252,6 +252,9 @@ class QwenController:
         self._gpu_fault_reason: str | None = None
         self._gpu_metrics: list[GpuMetricSnapshot] = []
         self._baseline_kernel_events: set[str] = set()
+        self._last_activity_monotonic = time.monotonic()
+        self._last_job_timestamp: str | None = None
+        self._last_unload_result: dict[str, object] | None = None
         self._model_loaded = False
         self._load_count = 0
         self._capabilities = self._fallback_capabilities()
@@ -261,11 +264,17 @@ class QwenController:
             name="qwen-job-dispatcher",
             daemon=True,
         )
+        self._lifecycle = threading.Thread(
+            target=self._lifecycle_loop,
+            name="qwen-worker-lifecycle",
+            daemon=True,
+        )
 
     def start(self) -> None:
         if not self._dispatcher.is_alive():
             self._state = "idle"
             self._dispatcher.start()
+            self._lifecycle.start()
             self._log("controller_started", creation_method=self.creation_method)
 
     def _log(self, event: str, **details: object) -> None:
@@ -329,6 +338,7 @@ class QwenController:
 
     def health(self) -> dict[str, object]:
         worker_pid = self._worker_pid()
+        idle_seconds = max(0.0, time.monotonic() - self._last_activity_monotonic)
         with self._lock:
             queue_items = [
                 {"request_id": job.request_id, "stage": job.stage}
@@ -360,6 +370,9 @@ class QwenController:
                     self._gpu_metrics[-1].to_dict() if self._gpu_metrics else None
                 ),
                 "gpu_metric_count": len(self._gpu_metrics),
+                "last_job_timestamp": self._last_job_timestamp,
+                "idle_seconds": idle_seconds,
+                "last_unload": self._last_unload_result,
             }
 
     def capabilities(self) -> dict[str, object]:
@@ -688,6 +701,7 @@ class QwenController:
                     if isinstance(result, dict):
                         if action == "unload":
                             self._model_loaded = False
+                            self._last_unload_result = result
                         return result
                 if message.get("event") in {"fatal", "process_exit"}:
                     self._worker_exited(worker)
@@ -733,7 +747,9 @@ class QwenController:
                 status=HTTPStatus.CONFLICT,
                 retryable=True,
             )
-        return self._command_worker("unload")
+        result = self._command_worker("unload")
+        self._last_unload_result = result
+        return result
 
     def stop_worker(self) -> dict[str, object]:
         if self._current_job is not None:
@@ -834,7 +850,39 @@ class QwenController:
             finally:
                 with self._lock:
                     self._current_job = None
+                    self._last_activity_monotonic = time.monotonic()
+                    self._last_job_timestamp = datetime.now(timezone.utc).isoformat()
                 job.done.set()
+
+    def _lifecycle_tick(self, now: float | None = None) -> str | None:
+        current = time.monotonic() if now is None else now
+        if self._current_job is not None or self._worker_pid() is None:
+            return None
+        idle = max(0.0, current - self._last_activity_monotonic)
+        if (
+            self._model_loaded
+            and self.policy.idle_unload_seconds > 0
+            and idle >= self.policy.idle_unload_seconds
+        ):
+            try:
+                result = self._command_worker("unload")
+            except QwenServiceError as exc:
+                self._log("idle_unload_failed", error=str(exc))
+                return "idle_unload_failed"
+            self._last_unload_result = result
+            self._log("idle_unload", **result)
+            return "idle_unload"
+        if (
+            self.policy.idle_shutdown_seconds > 0
+            and idle >= self.policy.idle_shutdown_seconds
+        ):
+            self._terminate_worker("idle_shutdown")
+            return "idle_shutdown"
+        return None
+
+    def _lifecycle_loop(self) -> None:
+        while not self._closing.wait(timeout=0.5):
+            self._lifecycle_tick()
 
     def close(self) -> None:
         self._state = "stopping"
@@ -844,6 +892,8 @@ class QwenController:
         self._jobs.put(None)
         if self._dispatcher.is_alive() and threading.current_thread() is not self._dispatcher:
             self._dispatcher.join(timeout=2)
+        if self._lifecycle.is_alive() and threading.current_thread() is not self._lifecycle:
+            self._lifecycle.join(timeout=2)
         self._state = "offline"
         self._log("controller_stopped")
 

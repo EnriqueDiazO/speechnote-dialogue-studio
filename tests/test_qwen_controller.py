@@ -360,3 +360,46 @@ def test_critical_temperature_stops_current_queue(tmp_path) -> None:
         assert "Temperatura GPU crítica" in blocker
     finally:
         controller.close()
+
+
+def test_idle_unload_then_shutdown_releases_worker(tmp_path) -> None:
+    process = SimulatedWorkerProcess()
+    controller = QwenController(
+        config(tmp_path, idle_unload_seconds=120, idle_shutdown_seconds=300),
+        popen=lambda *_args, **_kwargs: process,
+        preflight_runner=safe_preflight,
+        metric_sampler=safe_metrics,
+        kernel_sampler=no_kernel_events,
+    )
+    controller._start_worker()
+    controller._model_loaded = True
+    baseline = controller._last_activity_monotonic
+    try:
+        assert controller._lifecycle_tick(baseline + 121) == "idle_unload"
+        assert controller.health()["model_loaded"] is False
+        assert controller.health()["last_unload"] == {"ok": True}
+        assert controller._lifecycle_tick(baseline + 301) == "idle_shutdown"
+        assert process.terminated is True
+        assert controller.health()["worker_alive"] is False
+    finally:
+        controller.close()
+
+
+def test_controller_restarts_worker_after_controlled_stop(tmp_path) -> None:
+    processes = [SimulatedWorkerProcess(), SimulatedWorkerProcess()]
+    controller = QwenController(
+        config(tmp_path),
+        popen=lambda *_args, **_kwargs: processes.pop(0),
+        preflight_runner=safe_preflight,
+        metric_sampler=safe_metrics,
+        kernel_sampler=no_kernel_events,
+    )
+    controller._start_worker()
+    first_pid = controller.health()["worker_pid"]
+    controller.stop_worker()
+    controller._start_worker()
+    try:
+        assert controller.health()["worker_pid"] != first_pid
+        assert controller.health()["worker_alive"] is True
+    finally:
+        controller.close()
