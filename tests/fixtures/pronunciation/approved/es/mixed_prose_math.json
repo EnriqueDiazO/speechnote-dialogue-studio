@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "es-mixed-prose-math-loss-function-001", "status": "approved", "language": "es", "profile": "classroom", "category": "mixed_prose_math", "written_text": "La función de pérdida es $L(\\theta)$.", "expected_spoken_text": "La función de pérdida es ele de theta."},
+    {"schema_version": 1, "case_id": "es-mixed-prose-math-partial-weight-001", "status": "approved", "language": "es", "profile": "classroom", "category": "mixed_prose_math", "written_text": "Calculamos $\\frac{\\partial L}{\\partial w_{ij}}$.", "expected_spoken_text": "Calculamos derivada parcial de ele respecto de doble u sub i jota."},
+    {"schema_version": 1, "case_id": "es-mixed-prose-math-limit-exists-001", "status": "approved", "language": "es", "profile": "classroom", "category": "mixed_prose_math", "written_text": "El límite $\\lim_{n\\to\\infty}a_n$ existe.", "expected_spoken_text": "El límite límite cuando ene tiende a infinito a sub ene existe.", "assertion_mode": "semantic", "semantic_anchors": ["El límite", "cuando ene tiende a infinito", "a sub ene", "existe"], "notes": "Caso semántico: la formulación completa puede eliminar la repetición futura de límite."}
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "es-linear-algebra-vector-001", "status": "approved", "language": "es", "profile": "classroom", "category": "linear_algebra", "written_text": "$\\vec{x}$", "expected_spoken_text": "vector equis"},
+    {"schema_version": 1, "case_id": "es-linear-algebra-bold-vector-001", "status": "approved", "language": "es", "profile": "classroom", "category": "linear_algebra", "written_text": "$\\mathbf{x}$", "expected_spoken_text": "equis en negrita"},
+    {"schema_version": 1, "case_id": "es-linear-algebra-matrix-001", "status": "approved", "language": "es", "profile": "classroom", "category": "linear_algebra", "written_text": "$\\begin{matrix}a&b\\\\c&d\\end{matrix}$", "expected_spoken_text": "matriz fila a columna be; fila ce columna de", "assertion_mode": "semantic", "semantic_anchors": ["matriz", "fila a columna be", "fila ce columna de"]},
+    {"schema_version": 1, "case_id": "es-linear-algebra-determinant-001", "status": "approved", "language": "es", "profile": "classroom", "category": "linear_algebra", "written_text": "$\\det(A)$", "expected_spoken_text": "determinante de a"},
+    {"schema_version": 1, "case_id": "es-linear-algebra-rank-001", "status": "approved", "language": "es", "profile": "classroom", "category": "linear_algebra", "written_text": "$\\operatorname{rank}(A)$", "expected_spoken_text": "rango de a"},
+    {"schema_version": 1, "case_id": "es-linear-algebra-kernel-001", "status": "approved", "language": "es", "profile": "classroom", "category": "linear_algebra", "written_text": "$\\ker A$", "expected_spoken_text": "núcleo de a"},
+    {"schema_version": 1, "case_id": "es-linear-algebra-real-space-001", "status": "approved", "language": "es", "profile": "classroom", "category": "linear_algebra", "written_text": "$\\mathbb{R}^n$", "expected_spoken_text": "números reales elevado a ene"},
+    {"schema_version": 1, "case_id": "es-linear-algebra-absolute-value-001", "status": "approved", "language": "es", "profile": "classroom", "category": "linear_algebra", "written_text": "$|x|$", "expected_spoken_text": "valor absoluto de equis"}
+  ]
+}

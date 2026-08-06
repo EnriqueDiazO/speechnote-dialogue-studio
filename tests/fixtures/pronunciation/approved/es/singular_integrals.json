@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "es-singular-integrals-s-gamma-001", "status": "approved", "language": "es", "profile": "classroom", "category": "singular_integrals", "written_text": "$S_\\Gamma$", "expected_spoken_text": "ese sub gamma"},
+    {"schema_version": 1, "case_id": "es-singular-integrals-p-gamma-plus-001", "status": "approved", "language": "es", "profile": "classroom", "category": "singular_integrals", "written_text": "$P_\\Gamma^+$", "expected_spoken_text": "pe sub gamma superíndice más", "notes": "P con subíndice se lee como letra, no como probabilidad."},
+    {"schema_version": 1, "case_id": "es-singular-integrals-p-gamma-minus-001", "status": "approved", "language": "es", "profile": "classroom", "category": "singular_integrals", "written_text": "$P_\\Gamma^-$", "expected_spoken_text": "pe sub gamma superíndice menos", "notes": "P con subíndice se lee como letra, no como probabilidad."},
+    {"schema_version": 1, "case_id": "es-singular-integrals-w-symbol-001", "status": "approved", "language": "es", "profile": "classroom", "category": "singular_integrals", "written_text": "$W(a)$", "expected_spoken_text": "doble u de a"},
+    {"schema_version": 1, "case_id": "es-singular-integrals-v-alpha-001", "status": "approved", "language": "es", "profile": "classroom", "category": "singular_integrals", "written_text": "$V_\\alpha$", "expected_spoken_text": "uve sub alfa"},
+    {"schema_version": 1, "case_id": "es-singular-integrals-chi-infinity-001", "status": "approved", "language": "es", "profile": "classroom", "category": "singular_integrals", "written_text": "$\\chi_\\infty$", "expected_spoken_text": "ji sub infinito"},
+    {"schema_version": 1, "case_id": "es-singular-integrals-r-double-index-001", "status": "approved", "language": "es", "profile": "classroom", "category": "singular_integrals", "written_text": "$R_{1,1}$", "expected_spoken_text": "erre sub uno, uno"},
+    {"schema_version": 1, "case_id": "es-singular-integrals-positive-reals-001", "status": "approved", "language": "es", "profile": "classroom", "category": "singular_integrals", "written_text": "$\\mathbb{R}_+$", "expected_spoken_text": "números reales sub más"}
+  ]
+}

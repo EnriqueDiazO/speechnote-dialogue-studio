@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "es-edge-cases-pipeline-boundary-001", "status": "approved", "language": "es", "profile": "classroom", "category": "edge_cases", "written_text": "pipeline", "expected_spoken_text": "pipeline", "forbidden_fragments": ["peepline", "pi pe line"]},
+    {"schema_version": 1, "case_id": "es-edge-cases-syntax-boundary-001", "status": "approved", "language": "es", "profile": "classroom", "category": "edge_cases", "written_text": "sintaxis", "expected_spoken_text": "sintaxis", "forbidden_fragments": ["seno taxis"]},
+    {"schema_version": 1, "case_id": "es-edge-cases-uuid-001", "status": "approved", "language": "es", "profile": "classroom", "category": "edge_cases", "written_text": "UUID 123e4567-e89b-12d3-a456-426614174000", "expected_spoken_text": "UUID 123e4567-e89b-12d3-a456-426614174000", "expected_warning_codes": ["unknown_acronym"], "expected_unsupported_fragments": ["UUID"], "forbidden_fragments": ["uno dos tres e cuatro"]},
+    {"schema_version": 1, "case_id": "es-edge-cases-url-001", "status": "approved", "language": "es", "profile": "classroom", "category": "edge_cases", "written_text": "https://example.org/pi", "expected_spoken_text": "https://example.org/pi", "forbidden_fragments": ["example punto org"]},
+    {"schema_version": 1, "case_id": "es-edge-cases-email-001", "status": "approved", "language": "es", "profile": "classroom", "category": "edge_cases", "written_text": "usuario@example.org", "expected_spoken_text": "usuario@example.org", "forbidden_fragments": ["arroba"]},
+    {"schema_version": 1, "case_id": "es-edge-cases-code-001", "status": "approved", "language": "es", "profile": "classroom", "category": "edge_cases", "written_text": "`x_i`", "expected_spoken_text": "`x_i`", "forbidden_fragments": ["equis sub i"]},
+    {"schema_version": 1, "case_id": "es-edge-cases-path-001", "status": "approved", "language": "es", "profile": "classroom", "category": "edge_cases", "written_text": "/home/user/file.py", "expected_spoken_text": "/home/user/file.py", "forbidden_fragments": ["punto pe ye"]},
+    {"schema_version": 1, "case_id": "es-edge-cases-unknown-command-001", "status": "approved", "language": "es", "profile": "symbolic", "category": "edge_cases", "written_text": "$\\unknowncommand{x}$", "expected_spoken_text": "unknowncommand equis", "assertion_mode": "warning_only", "expected_warning_codes": ["unsupported_math_command"], "expected_unsupported_fragments": ["\\unknowncommand{x}"], "forbidden_fragments": ["comando conocido"]}
+  ]
+}

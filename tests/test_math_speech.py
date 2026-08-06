@@ -20,8 +20,8 @@ from dialogue_studio.pronunciation import PronunciationEngine, PronunciationProf
         ),
         (
             r"$\frac{\partial L}{\partial w_{ij}}$",
-            ("derivada parcial ele dividido entre", "doble u sub i jota"),
-            ("partial derivative L divided by", "w sub i j"),
+            ("derivada parcial de ele respecto de", "doble u sub i jota"),
+            ("partial derivative of L with respect to", "w sub i j"),
         ),
         (
             r"$\sum_{i=1}^{n}(y_i-\hat{y}_i)^2$",

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "es-algebra-square-001", "status": "approved", "language": "es", "profile": "classroom", "category": "algebra", "written_text": "$x^2$", "expected_spoken_text": "equis al cuadrado"},
+    {"schema_version": 1, "case_id": "es-algebra-cube-001", "status": "approved", "language": "es", "profile": "classroom", "category": "algebra", "written_text": "$x^3$", "expected_spoken_text": "equis al cubo"},
+    {"schema_version": 1, "case_id": "es-algebra-subscript-001", "status": "approved", "language": "es", "profile": "classroom", "category": "algebra", "written_text": "$x_i$", "expected_spoken_text": "equis sub i"},
+    {"schema_version": 1, "case_id": "es-algebra-subscript-square-001", "status": "approved", "language": "es", "profile": "classroom", "category": "algebra", "written_text": "$x_i^2$", "expected_spoken_text": "equis sub i al cuadrado"},
+    {"schema_version": 1, "case_id": "es-algebra-double-subscript-001", "status": "approved", "language": "es", "profile": "classroom", "category": "algebra", "written_text": "$a_{ij}$", "expected_spoken_text": "a sub i jota"},
+    {"schema_version": 1, "case_id": "es-algebra-inverse-001", "status": "approved", "language": "es", "profile": "classroom", "category": "algebra", "written_text": "$A^{-1}$", "expected_spoken_text": "a inversa"},
+    {"schema_version": 1, "case_id": "es-algebra-transpose-001", "status": "approved", "language": "es", "profile": "classroom", "category": "algebra", "written_text": "$A^T$", "expected_spoken_text": "a transpuesta"},
+    {"schema_version": 1, "case_id": "es-algebra-norm-001", "status": "approved", "language": "es", "profile": "classroom", "category": "algebra", "written_text": "$\\|x\\|$", "expected_spoken_text": "norma de equis"},
+    {"schema_version": 1, "case_id": "es-algebra-inner-product-001", "status": "approved", "language": "es", "profile": "classroom", "category": "algebra", "written_text": "$\\langle x,y\\rangle$", "expected_spoken_text": "producto interno de equis, ye"},
+    {"schema_version": 1, "case_id": "es-algebra-linear-equation-001", "status": "approved", "language": "es", "profile": "classroom", "category": "algebra", "written_text": "$y=mx+b$", "expected_spoken_text": "ye igual a eme equis más be"}
+  ]
+}

@@ -26,11 +26,11 @@ _FUNCTIONS = {
         "exp": "exponencial",
         "max": "máximo",
         "min": "mínimo",
-        "det": "determinante",
-        "tr": "traza",
-        "rank": "rango",
-        "ker": "núcleo",
-        "im": "imagen",
+        "det": "determinante de",
+        "tr": "traza de",
+        "rank": "rango de",
+        "ker": "núcleo de",
+        "im": "imagen de",
     },
     "en": {
         "sin": "sine",
@@ -41,11 +41,11 @@ _FUNCTIONS = {
         "exp": "exponential",
         "max": "maximum",
         "min": "minimum",
-        "det": "determinant",
-        "tr": "trace",
-        "rank": "rank",
-        "ker": "kernel",
-        "im": "image",
+        "det": "determinant of",
+        "tr": "trace of",
+        "rank": "rank of",
+        "ker": "kernel of",
+        "im": "image of",
     },
 }
 
@@ -221,7 +221,7 @@ class _Reader:
         start = self.position
         if self.text[self.position] in "+-":
             self.position += 1
-        while self.position < len(self.text) and self.text[self.position].isalnum():
+        if self.position < len(self.text) and self.text[self.position].isalnum():
             self.position += 1
         if self.position == start:
             self.position += 1
@@ -256,6 +256,15 @@ class _Reader:
                 parts.append(self._word("inversa", "inverse"))
             elif superscript.strip().upper() == "T":
                 parts.append(self._word("transpuesta", "transpose"))
+            elif superscript.strip() == "*":
+                parts.append(self._word("estrella", "star"))
+            elif superscript.strip() in {"+", "-"}:
+                sign = (
+                    self._word("más", "plus")
+                    if superscript.strip() == "+"
+                    else self._word("menos", "minus")
+                )
+                parts.append(self._word(f"superíndice {sign}", f"superscript {sign}"))
             else:
                 parts.append(self._word(f"elevado a {spoken}", f"to the power {spoken}"))
         return " ".join(parts)
@@ -267,7 +276,12 @@ class _Reader:
         ):
             self.position += 1
         value = self.text[start : self.position]
-        if value in self.aliases:
+        scripted_probability_symbol = (
+            value == "P"
+            and self.position < len(self.text)
+            and self.text[self.position] in "_^"
+        )
+        if value in self.aliases and not scripted_probability_symbol:
             spoken = self.aliases[value]
         elif value.lower() == "softmax":
             spoken = "soft max"
@@ -288,16 +302,38 @@ class _Reader:
         else:
             spoken = value
         spoken = self._with_scripts(spoken)
-        if self.position < len(self.text) and self.text[self.position] == "(":
-            grouped = self._balanced("(", ")")
+        if self.position < len(self.text) and self.text[self.position] in "([":
+            opening = self.text[self.position]
+            closing = ")" if opening == "(" else "]"
+            grouped = self._balanced(opening, closing)
             if grouped is not None:
                 argument = self._subreader(grouped)
                 return self._word(f"{spoken} de {argument}", f"{spoken} of {argument}")
         return spoken
 
     def _fraction(self) -> str:
-        numerator = self._subreader(self._argument())
-        denominator = self._subreader(self._argument())
+        raw_numerator = self._argument()
+        raw_denominator = self._argument()
+        partial_numerator = re.fullmatch(r"\\partial\s*(.+)", raw_numerator.strip())
+        partial_denominator = re.fullmatch(r"\\partial\s*(.+)", raw_denominator.strip())
+        if partial_numerator and partial_denominator:
+            numerator = self._subreader(partial_numerator.group(1))
+            denominator = self._subreader(partial_denominator.group(1))
+            return self._word(
+                f"derivada parcial de {numerator} respecto de {denominator}",
+                f"partial derivative of {numerator} with respect to {denominator}",
+            )
+        ordinary_numerator = re.fullmatch(r"d\s*(.+)", raw_numerator.strip())
+        ordinary_denominator = re.fullmatch(r"d\s*(.+)", raw_denominator.strip())
+        if ordinary_numerator and ordinary_denominator:
+            numerator = self._subreader(ordinary_numerator.group(1))
+            denominator = self._subreader(ordinary_denominator.group(1))
+            return self._word(
+                f"derivada de {numerator} respecto de {denominator}",
+                f"derivative of {numerator} with respect to {denominator}",
+            )
+        numerator = self._subreader(raw_numerator)
+        denominator = self._subreader(raw_denominator)
         if self.style == "concise":
             return self._word(
                 f"{numerator} sobre {denominator}",
@@ -345,7 +381,10 @@ class _Reader:
         parts = [base]
         if subscript:
             lower = self._subreader(subscript)
-            parts.append(self._word(f"desde {lower}", f"from {lower}"))
+            if command in {"int", "iint", "iiint", "oint"} and not superscript:
+                parts.append(self._word(f"sobre {lower},", f"over {lower},"))
+            else:
+                parts.append(self._word(f"desde {lower}", f"from {lower}"))
         if superscript:
             upper = self._subreader(superscript)
             parts.append(self._word(f"hasta {upper}", f"to {upper}"))
@@ -356,8 +395,19 @@ class _Reader:
         subscript, _superscript = self._scripts()
         if not subscript:
             return self._word("límite", "limit")
+        compact = subscript.replace(" ", "")
+        side = ""
+        if compact.endswith("^+"):
+            subscript = subscript[: subscript.rfind("^")]
+            side = self._word(" por la derecha", " from the right")
+        elif compact.endswith("^-"):
+            subscript = subscript[: subscript.rfind("^")]
+            side = self._word(" por la izquierda", " from the left")
         approach = self._subreader(subscript)
-        return self._word(f"límite cuando {approach}", f"limit as {approach}")
+        return self._word(
+            f"límite cuando {approach}{side}",
+            f"limit as {approach}{side}",
+        )
 
     def _unknown(self, start: int, command: str) -> str:
         argument = ""
@@ -386,6 +436,8 @@ class _Reader:
         if self.position < len(self.text) and not self.text[self.position].isalpha():
             spacing = self.text[self.position]
             self.position += 1
+            if spacing == "%":
+                return self._word("por ciento", "percent")
             return "" if spacing in ",;! " else spacing
         name_start = self.position
         while self.position < len(self.text) and self.text[self.position].isalpha():
@@ -432,6 +484,9 @@ class _Reader:
         if command == "hat":
             content = self._subreader(self._argument())
             return self._word(f"{content} estimada", f"{content} hat")
+        if command in {"bar", "overline"}:
+            content = self._subreader(self._argument())
+            return self._word(f"{content} barra", f"{content} bar")
         if command == "langle":
             closing = self.text.find("\\rangle", self.position)
             if closing >= 0:
@@ -490,11 +545,11 @@ class _Reader:
                             f"{spoken} of {argument}",
                         )
             return self._with_scripts(spoken)
+        if character.isalnum() or character.isalpha():
+            return self._identifier()
         if character in self.aliases:
             self.position += 1
             return self._with_scripts(self.aliases[character])
-        if character.isalnum() or character.isalpha():
-            return self._identifier()
         if self.text.startswith("||", self.position):
             self.position += 2
             closing = self.text.find("||", self.position)

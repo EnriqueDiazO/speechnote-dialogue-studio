@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "es-basic-arithmetic-addition-001", "status": "approved", "language": "es", "profile": "classroom", "category": "basic_arithmetic", "written_text": "$2+3$", "expected_spoken_text": "dos más tres"},
+    {"schema_version": 1, "case_id": "es-basic-arithmetic-subtraction-001", "status": "approved", "language": "es", "profile": "classroom", "category": "basic_arithmetic", "written_text": "$7-4$", "expected_spoken_text": "siete menos cuatro"},
+    {"schema_version": 1, "case_id": "es-basic-arithmetic-multiplication-001", "status": "approved", "language": "es", "profile": "classroom", "category": "basic_arithmetic", "written_text": "$3\\times5$", "expected_spoken_text": "tres por cinco"},
+    {"schema_version": 1, "case_id": "es-basic-arithmetic-division-001", "status": "approved", "language": "es", "profile": "classroom", "category": "basic_arithmetic", "written_text": "$10/2$", "expected_spoken_text": "diez dividido entre dos"},
+    {"schema_version": 1, "case_id": "es-basic-arithmetic-less-equal-001", "status": "approved", "language": "es", "profile": "classroom", "category": "basic_arithmetic", "written_text": "$2\\leq3$", "expected_spoken_text": "dos menor o igual que tres"},
+    {"schema_version": 1, "case_id": "es-basic-arithmetic-not-equal-001", "status": "approved", "language": "es", "profile": "classroom", "category": "basic_arithmetic", "written_text": "$4\\neq5$", "expected_spoken_text": "cuatro distinto de cinco"}
+  ]
+}

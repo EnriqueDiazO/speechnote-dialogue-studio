@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "es-machine-learning-sigmoid-001", "status": "approved", "language": "es", "profile": "classroom", "category": "machine_learning", "written_text": "$y=\\sigma(Wx+b)$", "expected_spoken_text": "ye igual a sigma de doble u equis más be"},
+    {"schema_version": 1, "case_id": "es-machine-learning-mse-001", "status": "approved", "language": "es", "profile": "classroom", "category": "machine_learning", "written_text": "MSE", "expected_spoken_text": "eme ese e"},
+    {"schema_version": 1, "case_id": "es-machine-learning-mae-001", "status": "approved", "language": "es", "profile": "classroom", "category": "machine_learning", "written_text": "MAE", "expected_spoken_text": "eme a e"},
+    {"schema_version": 1, "case_id": "es-machine-learning-relu-001", "status": "approved", "language": "es", "profile": "classroom", "category": "machine_learning", "written_text": "ReLU", "expected_spoken_text": "re lu"},
+    {"schema_version": 1, "case_id": "es-machine-learning-softmax-001", "status": "approved", "language": "es", "profile": "classroom", "category": "machine_learning", "written_text": "softmax", "expected_spoken_text": "soft max"},
+    {"schema_version": 1, "case_id": "es-machine-learning-sgd-001", "status": "approved", "language": "es", "profile": "classroom", "category": "machine_learning", "written_text": "SGD", "expected_spoken_text": "ese ge de"},
+    {"schema_version": 1, "case_id": "es-machine-learning-adam-001", "status": "approved", "language": "es", "profile": "classroom", "category": "machine_learning", "written_text": "Adam", "expected_spoken_text": "ádam"},
+    {"schema_version": 1, "case_id": "es-machine-learning-gradient-update-001", "status": "approved", "language": "es", "profile": "classroom", "category": "machine_learning", "written_text": "$\\theta_{t+1}=\\theta_t-\\eta\\nabla L(\\theta_t)$", "expected_spoken_text": "theta sub te más uno igual a theta sub te menos eta gradiente ele de theta sub te"}
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "es-operator-theory-lp-space-001", "status": "approved", "language": "es", "profile": "classroom", "category": "operator_theory", "written_text": "$L^p$", "expected_spoken_text": "ele elevado a pe"},
+    {"schema_version": 1, "case_id": "es-operator-theory-c-star-001", "status": "approved", "language": "es", "profile": "classroom", "category": "operator_theory", "written_text": "$C^*$", "expected_spoken_text": "ce estrella"},
+    {"schema_version": 1, "case_id": "es-operator-theory-bounded-operators-001", "status": "approved", "language": "es", "profile": "classroom", "category": "operator_theory", "written_text": "$\\mathcal{B}(H)$", "expected_spoken_text": "be de hache"},
+    {"schema_version": 1, "case_id": "es-operator-theory-kernel-001", "status": "approved", "language": "es", "profile": "classroom", "category": "operator_theory", "written_text": "$\\ker A$", "expected_spoken_text": "núcleo de a"},
+    {"schema_version": 1, "case_id": "es-operator-theory-image-001", "status": "approved", "language": "es", "profile": "classroom", "category": "operator_theory", "written_text": "$\\operatorname{im} A$", "expected_spoken_text": "imagen de a"},
+    {"schema_version": 1, "case_id": "es-operator-theory-spectrum-001", "status": "approved", "language": "es", "profile": "classroom", "category": "operator_theory", "written_text": "$\\sigma(A)$", "expected_spoken_text": "sigma de a", "notes": "Se conserva sigma como notación del espectro sin inferir una definición."},
+    {"schema_version": 1, "case_id": "es-operator-theory-shifted-operator-001", "status": "approved", "language": "es", "profile": "classroom", "category": "operator_theory", "written_text": "$A-\\lambda I$", "expected_spoken_text": "a menos lambda i"},
+    {"schema_version": 1, "case_id": "es-operator-theory-operator-norm-001", "status": "approved", "language": "es", "profile": "classroom", "category": "operator_theory", "written_text": "$\\|A\\|$", "expected_spoken_text": "norma de a"}
+  ]
+}

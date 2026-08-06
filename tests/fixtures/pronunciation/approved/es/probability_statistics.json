@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "es-probability-event-001", "status": "approved", "language": "es", "profile": "classroom", "category": "probability_statistics", "written_text": "$P(A)$", "expected_spoken_text": "probabilidad de a"},
+    {"schema_version": 1, "case_id": "es-probability-conditional-001", "status": "approved", "language": "es", "profile": "classroom", "category": "probability_statistics", "written_text": "$P(A\\mid B)$", "expected_spoken_text": "probabilidad de a dado be"},
+    {"schema_version": 1, "case_id": "es-statistics-expectation-001", "status": "approved", "language": "es", "profile": "classroom", "category": "probability_statistics", "written_text": "$E[X]$", "expected_spoken_text": "esperanza de equis"},
+    {"schema_version": 1, "case_id": "es-statistics-variance-001", "status": "approved", "language": "es", "profile": "classroom", "category": "probability_statistics", "written_text": "$Var(X)$", "expected_spoken_text": "varianza de equis"},
+    {"schema_version": 1, "case_id": "es-statistics-covariance-001", "status": "approved", "language": "es", "profile": "classroom", "category": "probability_statistics", "written_text": "$Cov(X,Y)$", "expected_spoken_text": "covarianza de equis, ye"},
+    {"schema_version": 1, "case_id": "es-statistics-sample-mean-001", "status": "approved", "language": "es", "profile": "classroom", "category": "probability_statistics", "written_text": "$\\bar{x}$", "expected_spoken_text": "equis barra"},
+    {"schema_version": 1, "case_id": "es-statistics-variance-symbol-001", "status": "approved", "language": "es", "profile": "classroom", "category": "probability_statistics", "written_text": "$\\sigma^2$", "expected_spoken_text": "sigma al cuadrado"},
+    {"schema_version": 1, "case_id": "es-statistics-p-value-001", "status": "approved", "language": "es", "profile": "classroom", "category": "probability_statistics", "written_text": "$p<0.05$", "expected_spoken_text": "pe menor que cero coma cero cinco"},
+    {"schema_version": 1, "case_id": "es-statistics-percentage-001", "status": "approved", "language": "es", "profile": "classroom", "category": "probability_statistics", "written_text": "$95\\%$", "expected_spoken_text": "noventa y cinco por ciento"},
+    {"schema_version": 1, "case_id": "es-statistics-scientific-notation-001", "status": "approved", "language": "es", "profile": "classroom", "category": "probability_statistics", "written_text": "$1.2\\times10^{-3}$", "expected_spoken_text": "uno coma dos por diez elevado a menos tres"}
+  ]
+}
