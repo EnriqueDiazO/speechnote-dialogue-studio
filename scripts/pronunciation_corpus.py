@@ -17,6 +17,7 @@ from dialogue_studio.pronunciation.corpus_maintenance import (
     preview_case,
     promote_case,
     validate_corpus,
+    write_corpus_report,
 )
 
 DEFAULT_CORPUS_ROOT = Path("tests/fixtures/pronunciation")
@@ -27,7 +28,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", type=Path, default=DEFAULT_CORPUS_ROOT)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("validate")
-    commands.add_parser("stats")
+    stats_parser = commands.add_parser("stats")
+    stats_parser.add_argument(
+        "--report",
+        type=Path,
+        help="Escribe un reporte JSON nuevo en la ruta indicada",
+    )
 
     list_parser = commands.add_parser("list")
     list_parser.add_argument("--status", choices=("approved", "candidate", "deprecated"))
@@ -68,6 +74,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.command == "stats":
             snapshot = load_pronunciation_corpus(root)
             print(json.dumps(corpus_statistics(snapshot), ensure_ascii=False, indent=2))
+            if args.report:
+                destination = write_corpus_report(snapshot, args.report)
+                print(f"Reporte escrito: {destination}", file=sys.stderr)
         elif args.command == "list":
             snapshot = load_pronunciation_corpus(root)
             for case in snapshot.cases:

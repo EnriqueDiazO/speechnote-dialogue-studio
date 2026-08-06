@@ -53,6 +53,23 @@ def corpus_statistics(snapshot: PronunciationCorpusSnapshot) -> dict[str, object
     }
 
 
+def write_corpus_report(
+    snapshot: PronunciationCorpusSnapshot,
+    destination: Path,
+) -> Path:
+    """Write a reproducible report without replacing an existing review artifact."""
+    if destination.exists() or destination.is_symlink():
+        raise FileExistsError(f"El reporte ya existe: {destination}")
+    report = {
+        "schema_version": CORPUS_SCHEMA_VERSION,
+        "corpus_version": snapshot.manifest.corpus_version,
+        "last_validated_at": snapshot.manifest.last_validated_at,
+        "statistics": corpus_statistics(snapshot),
+    }
+    atomic_write_text(destination, deterministic_json(report))
+    return destination
+
+
 def find_case(
     snapshot: PronunciationCorpusSnapshot, case_id: str
 ) -> PronunciationCorpusCase:

@@ -15,6 +15,7 @@ from dialogue_studio.pronunciation.corpus_maintenance import (
     preview_case,
     promote_case,
     validate_corpus,
+    write_corpus_report,
 )
 from scripts.pronunciation_corpus import main
 
@@ -67,6 +68,18 @@ def test_validate_and_statistics_cover_the_checked_in_corpus() -> None:
     assert stats["approved"] == 108
     assert stats["by_language"] == {"en": 25, "es": 88}
     assert stats["with_warnings"] == 3
+
+
+def test_reproducible_report_is_new_and_contains_no_local_root(tmp_path: Path) -> None:
+    snapshot = validate_corpus(CORPUS_ROOT)
+    destination = tmp_path / "temporary" / "pronunciation-corpus-report.json"
+    write_corpus_report(snapshot, destination)
+    report = json.loads(destination.read_text(encoding="utf-8"))
+    assert report["corpus_version"] == "1.0.0"
+    assert report["statistics"]["approved"] == 108
+    assert str(CORPUS_ROOT.resolve()) not in destination.read_text(encoding="utf-8")
+    with pytest.raises(FileExistsError, match="ya existe"):
+        write_corpus_report(snapshot, destination)
 
 
 def test_add_candidate_is_atomic_preserves_source_and_rejects_duplicate(

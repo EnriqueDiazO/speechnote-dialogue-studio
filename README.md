@@ -99,7 +99,9 @@ reemplaza de forma segura los JSON del proyecto que el usuario ya abrió o creó
 
 Consulta [docs/PROJECT_FORMAT.md](docs/PROJECT_FORMAT.md) para el esquema portable y el contenido
 del ZIP, y [docs/PRONUNCIATION_DICTIONARY.md](docs/PRONUNCIATION_DICTIONARY.md) para reglas,
-ecuaciones, perfiles, precedencia, importación y solución de problemas.
+ecuaciones, perfiles, precedencia, importación y solución de problemas. El corpus de lecturas
+revisadas, su CLI y el flujo de promoción están documentados en
+[docs/PRONUNCIATION_CORPUS.md](docs/PRONUNCIATION_CORPUS.md).
 
 ## Diagnóstico manual
 
