@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "en-calculus-fraction-001", "status": "approved", "language": "en", "profile": "concise", "category": "calculus", "written_text": "$\\frac{a}{b}$", "expected_spoken_text": "a over b"},
+    {"schema_version": 1, "case_id": "en-calculus-derivative-001", "status": "approved", "language": "en", "profile": "classroom", "category": "calculus", "written_text": "$\\frac{dy}{dx}$", "expected_spoken_text": "derivative of y with respect to x"},
+    {"schema_version": 1, "case_id": "en-calculus-partial-derivative-001", "status": "approved", "language": "en", "profile": "classroom", "category": "calculus", "written_text": "$\\frac{\\partial f}{\\partial x}$", "expected_spoken_text": "partial derivative of f with respect to x"},
+    {"schema_version": 1, "case_id": "en-calculus-sum-001", "status": "approved", "language": "en", "profile": "classroom", "category": "calculus", "written_text": "$\\sum_{i=1}^{n}a_i$", "expected_spoken_text": "sum from i equals one to n of a sub i"},
+    {"schema_version": 1, "case_id": "en-calculus-integral-001", "status": "approved", "language": "en", "profile": "classroom", "category": "calculus", "written_text": "$\\int_a^b f(x)\\,dx$", "expected_spoken_text": "integral from a to b of f of x d x"},
+    {"schema_version": 1, "case_id": "en-calculus-limit-001", "status": "approved", "language": "en", "profile": "classroom", "category": "calculus", "written_text": "$\\lim_{x\\to a}f(x)$", "expected_spoken_text": "limit as x approaches a f of x"},
+    {"schema_version": 1, "case_id": "en-calculus-square-root-001", "status": "approved", "language": "en", "profile": "explicit", "category": "calculus", "written_text": "$\\sqrt{x}$", "expected_spoken_text": "square root of x"}
+  ]
+}

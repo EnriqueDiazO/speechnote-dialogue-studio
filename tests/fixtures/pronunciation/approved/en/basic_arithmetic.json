@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "en-basic-arithmetic-addition-001", "status": "approved", "language": "en", "profile": "classroom", "category": "basic_arithmetic", "written_text": "$2+3$", "expected_spoken_text": "two plus three"},
+    {"schema_version": 1, "case_id": "en-basic-arithmetic-not-equal-001", "status": "approved", "language": "en", "profile": "classroom", "category": "basic_arithmetic", "written_text": "$4\\neq5$", "expected_spoken_text": "four not equal to five"}
+  ]
+}

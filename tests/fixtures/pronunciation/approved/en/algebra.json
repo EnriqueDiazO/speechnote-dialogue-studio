@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "en-algebra-square-001", "status": "approved", "language": "en", "profile": "classroom", "category": "algebra", "written_text": "$x^2$", "expected_spoken_text": "x squared"},
+    {"schema_version": 1, "case_id": "en-algebra-subscript-001", "status": "approved", "language": "en", "profile": "classroom", "category": "algebra", "written_text": "$x_i$", "expected_spoken_text": "x sub i"},
+    {"schema_version": 1, "case_id": "en-algebra-inverse-001", "status": "approved", "language": "en", "profile": "classroom", "category": "algebra", "written_text": "$A^{-1}$", "expected_spoken_text": "A inverse"},
+    {"schema_version": 1, "case_id": "en-algebra-linear-equation-001", "status": "approved", "language": "en", "profile": "classroom", "category": "algebra", "written_text": "$y=mx+b$", "expected_spoken_text": "y equals m x plus b"}
+  ]
+}

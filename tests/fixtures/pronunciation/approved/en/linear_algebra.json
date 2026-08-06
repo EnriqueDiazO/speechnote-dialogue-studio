@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "en-linear-algebra-vector-001", "status": "approved", "language": "en", "profile": "classroom", "category": "linear_algebra", "written_text": "$\\vec{x}$", "expected_spoken_text": "vector x"},
+    {"schema_version": 1, "case_id": "en-linear-algebra-inner-product-001", "status": "approved", "language": "en", "profile": "classroom", "category": "linear_algebra", "written_text": "$\\langle x,y\\rangle$", "expected_spoken_text": "inner product of x, y"},
+    {"schema_version": 1, "case_id": "en-linear-algebra-real-space-001", "status": "approved", "language": "en", "profile": "classroom", "category": "linear_algebra", "written_text": "$\\mathbb{R}^n$", "expected_spoken_text": "real numbers to the power n"}
+  ]
+}

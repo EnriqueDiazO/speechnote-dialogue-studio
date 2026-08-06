@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "en-machine-learning-mse-001", "status": "approved", "language": "en", "profile": "classroom", "category": "machine_learning", "written_text": "MSE", "expected_spoken_text": "em ess ee"},
+    {"schema_version": 1, "case_id": "en-machine-learning-relu-001", "status": "approved", "language": "en", "profile": "classroom", "category": "machine_learning", "written_text": "ReLU", "expected_spoken_text": "ree loo"},
+    {"schema_version": 1, "case_id": "en-machine-learning-sigmoid-001", "status": "approved", "language": "en", "profile": "classroom", "category": "machine_learning", "written_text": "$y=\\sigma(Wx+b)$", "expected_spoken_text": "y equals sigma of W x plus b"}
+  ]
+}

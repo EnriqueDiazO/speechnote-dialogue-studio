@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "en-probability-conditional-001", "status": "approved", "language": "en", "profile": "classroom", "category": "probability_statistics", "written_text": "$P(A\\mid B)$", "expected_spoken_text": "probability of A given B"},
+    {"schema_version": 1, "case_id": "en-statistics-expectation-001", "status": "approved", "language": "en", "profile": "classroom", "category": "probability_statistics", "written_text": "$E[X]$", "expected_spoken_text": "expectation of X"},
+    {"schema_version": 1, "case_id": "en-statistics-p-value-001", "status": "approved", "language": "en", "profile": "classroom", "category": "probability_statistics", "written_text": "$p<0.05$", "expected_spoken_text": "p less than zero point zero five"}
+  ]
+}

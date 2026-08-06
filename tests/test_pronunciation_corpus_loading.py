@@ -11,7 +11,7 @@ def test_corpus_discovers_versioned_files_without_fixed_file_list() -> None:
     snapshot = load_pronunciation_corpus(CORPUS_ROOT)
     assert snapshot.manifest.corpus_version == "1.0.0"
     assert len(snapshot.candidates) == 5
-    assert len(snapshot.approved) == 83
+    assert len(snapshot.approved) == 108
     assert not snapshot.deprecated
     assert {case.written_text for case in snapshot.candidates} == {
         "Haseman",

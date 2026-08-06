@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"schema_version": 1, "case_id": "en-edge-cases-unknown-command-001", "status": "approved", "language": "en", "profile": "symbolic", "category": "edge_cases", "written_text": "$\\unknowncommand{x}$", "expected_spoken_text": "unknowncommand x", "assertion_mode": "warning_only", "expected_warning_codes": ["unsupported_math_command"], "expected_unsupported_fragments": ["\\unknowncommand{x}"]},
+    {"schema_version": 1, "case_id": "en-edge-cases-url-001", "status": "approved", "language": "en", "profile": "classroom", "category": "edge_cases", "written_text": "https://example.org/pi", "expected_spoken_text": "https://example.org/pi", "forbidden_fragments": ["example dot org"]},
+    {"schema_version": 1, "case_id": "en-edge-cases-code-001", "status": "approved", "language": "en", "profile": "classroom", "category": "edge_cases", "written_text": "`x_i`", "expected_spoken_text": "`x_i`", "forbidden_fragments": ["x sub i"]}
+  ]
+}
