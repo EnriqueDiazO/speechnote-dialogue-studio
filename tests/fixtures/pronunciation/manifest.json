@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "corpus_version": "1.0.0",
+  "supported_languages": ["es", "en"],
+  "default_profiles": {
+    "es": "classroom",
+    "en": "classroom"
+  },
+  "categories": [
+    "basic_arithmetic",
+    "algebra",
+    "calculus",
+    "linear_algebra",
+    "functional_analysis",
+    "operator_theory",
+    "singular_integrals",
+    "probability",
+    "statistics",
+    "probability_statistics",
+    "machine_learning",
+    "computing",
+    "units",
+    "acronyms",
+    "proper_names",
+    "mixed_prose_math",
+    "edge_cases"
+  ],
+  "case_counts": {
+    "total": 5,
+    "approved": 0,
+    "candidate": 5,
+    "deprecated": 0
+  },
+  "last_validated_at": "2026-08-05T00:00:00+00:00"
+}

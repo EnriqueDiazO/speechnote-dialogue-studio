@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
+from collections import Counter
 from dataclasses import asdict, dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 from .models import MATH_STYLES, PronunciationProfile
@@ -248,3 +251,113 @@ class PronunciationCorpusManifest:
             "case_counts": dict(self.case_counts),
             "last_validated_at": self.last_validated_at,
         }
+
+
+@dataclass(frozen=True)
+class PronunciationCorpusSnapshot:
+    root: Path
+    manifest: PronunciationCorpusManifest
+    cases: tuple[PronunciationCorpusCase, ...]
+    case_paths: dict[str, Path]
+
+    @property
+    def approved(self) -> tuple[PronunciationCorpusCase, ...]:
+        return tuple(case for case in self.cases if case.status == "approved")
+
+    @property
+    def candidates(self) -> tuple[PronunciationCorpusCase, ...]:
+        return tuple(case for case in self.cases if case.status == "candidate")
+
+    @property
+    def deprecated(self) -> tuple[PronunciationCorpusCase, ...]:
+        return tuple(case for case in self.cases if case.status == "deprecated")
+
+
+def _load_json_object(path: Path) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"El archivo de corpus no es regular: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"JSON de corpus inválido en {path}: {exc}") from exc
+    if not isinstance(value, dict):
+        raise ValueError(f"La raíz JSON debe ser un objeto: {path}")
+    return value
+
+
+def load_pronunciation_corpus(
+    root: Path,
+    *,
+    require_cases: bool = True,
+    validate_manifest_counts: bool = True,
+) -> PronunciationCorpusSnapshot:
+    resolved_root = root.resolve()
+    manifest_path = resolved_root / "manifest.json"
+    manifest = PronunciationCorpusManifest.from_dict(_load_json_object(manifest_path))
+    cases: list[PronunciationCorpusCase] = []
+    case_paths: dict[str, Path] = {}
+    status_directories = {
+        "approved": "approved",
+        "candidates": "candidate",
+        "deprecated": "deprecated",
+    }
+    for directory_name, expected_status in status_directories.items():
+        directory = resolved_root / directory_name
+        if directory.is_symlink() or not directory.is_dir():
+            raise ValueError(f"Falta el directorio de corpus: {directory_name}")
+        for path in sorted(directory.rglob("*.json")):
+            if resolved_root not in path.resolve().parents:
+                raise ValueError(f"Ruta de corpus fuera de la raíz: {path}")
+            relative = path.relative_to(resolved_root)
+            if len(relative.parts) < 3:
+                raise ValueError(f"El archivo no declara idioma en su ruta: {relative}")
+            expected_language = relative.parts[1]
+            data = _load_json_object(path)
+            if int(data.get("schema_version", 0)) != CORPUS_SCHEMA_VERSION:
+                raise ValueError(f"schema_version de archivo no soportada: {relative}")
+            raw_cases = data.get("cases")
+            if not isinstance(raw_cases, list):
+                raise ValueError(f"El archivo necesita una lista cases: {relative}")
+            for raw in raw_cases:
+                if not isinstance(raw, dict):
+                    raise ValueError(f"Caso no válido en {relative}")
+                case = PronunciationCorpusCase.from_dict(raw)
+                if case.status != expected_status:
+                    raise ValueError(
+                        f"{case.case_id}: status {case.status} no coincide con {directory_name}"
+                    )
+                if case.language != expected_language:
+                    raise ValueError(
+                        f"{case.case_id}: idioma {case.language} no coincide con la ruta"
+                    )
+                if case.category not in manifest.categories:
+                    raise ValueError(
+                        f"{case.case_id}: categoría ausente del manifest: {case.category}"
+                    )
+                if case.case_id in case_paths:
+                    first = case_paths[case.case_id].relative_to(resolved_root)
+                    raise ValueError(
+                        f"case_id duplicado {case.case_id}: {first} y {relative}"
+                    )
+                cases.append(case)
+                case_paths[case.case_id] = path
+    cases.sort(key=lambda case: case.case_id)
+    if require_cases and not cases:
+        raise ValueError("El corpus está vacío")
+    counts = Counter(case.status for case in cases)
+    actual_counts = {
+        "total": len(cases),
+        "approved": counts["approved"],
+        "candidate": counts["candidate"],
+        "deprecated": counts["deprecated"],
+    }
+    if validate_manifest_counts and manifest.case_counts != actual_counts:
+        raise ValueError(
+            f"case_counts inconsistente: manifest={manifest.case_counts}, actual={actual_counts}"
+        )
+    return PronunciationCorpusSnapshot(
+        root=resolved_root,
+        manifest=manifest,
+        cases=tuple(cases),
+        case_paths=case_paths,
+    )
