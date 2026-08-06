@@ -49,6 +49,9 @@ def test_preview_trace_warning_and_quick_project_rule(monkeypatch, tmp_path: Pat
     assert "derivada parcial" in result.spoken_text
     assert result.unsupported_fragments == ("MOFA2",)
     assert any("por revisar" in warning.value for warning in app.warning)
+    assert _keyed(
+        app.get("download_button"), "pronunciation-preview-corpus-download"
+    )
 
     _keyed(app.text_input, "pronunciation-preview-quick-term").set_value("MOFA2").run()
     _keyed(app.text_input, "pronunciation-preview-quick-spoken").set_value(
@@ -106,6 +109,18 @@ def test_utterance_manual_override_local_rule_and_pending_candidate(
         app.button,
         f"utterance-pronunciation-apply-{utterance.utterance_id}",
     ).click().run()
+    assert utterance.text == "Qwen usa MOFA2"
+    assert utterance.manual_spoken_text_override == "cuen usa mofa dos"
+
+    export_toggle = _keyed(
+        app.checkbox,
+        f"utterance-pronunciation-corpus-visible-{utterance.utterance_id}",
+    )
+    export_toggle.check().run()
+    assert _keyed(
+        app.get("download_button"),
+        f"utterance-pronunciation-corpus-{utterance.utterance_id}-download",
+    )
     assert utterance.text == "Qwen usa MOFA2"
     assert utterance.manual_spoken_text_override == "cuen usa mofa dos"
 

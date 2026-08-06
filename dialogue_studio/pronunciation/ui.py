@@ -18,6 +18,7 @@ from ..service import (
     update_pronunciation_profile,
     update_utterance_pronunciation,
 )
+from .corpus_export import build_corpus_candidate, export_corpus_candidate_json
 from .engine import PronunciationEngine
 from .glossary import builtin_rules
 from .import_export import (
@@ -32,7 +33,7 @@ from .import_export import (
     preview_rule_import,
     update_rule_with_audit,
 )
-from .models import PronunciationProfile, PronunciationRule
+from .models import PronunciationProfile, PronunciationResult, PronunciationRule
 
 
 def global_rules() -> list[PronunciationRule]:
@@ -43,6 +44,58 @@ def _reset_audio_artifacts() -> None:
     st.session_state.master_wav = None
     st.session_state.master_mp3 = None
     st.session_state.project_zip = None
+
+
+def _render_corpus_candidate_export(
+    result: PronunciationResult,
+    *,
+    key_prefix: str,
+    initial_category: str = "mixed_prose_math",
+) -> None:
+    st.caption(
+        "Este archivo es un candidato. No se incorpora a las pruebas hasta ser "
+        "revisado y promovido explícitamente."
+    )
+    fields = st.columns(2)
+    case_id = fields[0].text_input(
+        "case_id",
+        value=(
+            f"{result.language.split('-', 1)[0]}-"
+            f"{initial_category.replace('_', '-')}-candidate-001"
+        ),
+        key=f"{key_prefix}-case-id",
+    )
+    category = fields[1].text_input(
+        "Categoría del corpus",
+        value=initial_category,
+        key=f"{key_prefix}-category",
+    )
+    tags_text = st.text_input(
+        "Tags separados por comas",
+        key=f"{key_prefix}-tags",
+    )
+    notes = st.text_area(
+        "Notas de revisión",
+        key=f"{key_prefix}-notes",
+        height=80,
+    )
+    try:
+        candidate = build_corpus_candidate(
+            result,
+            case_id=case_id,
+            category=category,
+            tags=tags_text.split(","),
+            notes=notes,
+        )
+        st.download_button(
+            "Descargar candidato JSON",
+            export_corpus_candidate_json(candidate),
+            file_name=f"{candidate.case_id}.json",
+            mime="application/json",
+            key=f"{key_prefix}-download",
+        )
+    except ValueError as exc:
+        st.error(str(exc))
 
 
 def _save_rules(
@@ -487,6 +540,11 @@ def _render_preview(
             st.warning(warning.message)
         if result.unsupported_fragments:
             st.caption("Fragmentos no soportados: " + ", ".join(result.unsupported_fragments))
+        with st.expander("Exportar como caso de corpus"):
+            _render_corpus_candidate_export(
+                result,
+                key_prefix="pronunciation-preview-corpus",
+            )
         quick = st.columns(4)
         quick[0].text_input("Término", key="pronunciation-preview-quick-term")
         quick[1].text_input("Pronunciación", key="pronunciation-preview-quick-spoken")
@@ -892,6 +950,16 @@ def render_utterance_pronunciation(
     st.code(result.spoken_text, language=None)
     for warning in result.warnings:
         st.warning(warning.message)
+    show_corpus_export = st.checkbox(
+        "Exportar lectura como caso candidato",
+        key=f"utterance-pronunciation-corpus-visible-{utterance.utterance_id}",
+    )
+    if show_corpus_export:
+        with st.container(border=True):
+            _render_corpus_candidate_export(
+                result,
+                key_prefix=f"utterance-pronunciation-corpus-{utterance.utterance_id}",
+            )
     if result.unsupported_fragments and st.button(
         "Enviar términos por revisar",
         key=f"utterance-pronunciation-pending-{utterance.utterance_id}",
