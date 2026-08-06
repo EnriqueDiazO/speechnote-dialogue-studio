@@ -84,6 +84,10 @@ class AppPaths:
     def pronunciation_pending_terms(self) -> Path:
         return self.config / "pronunciation-pending-terms.json"
 
+    @property
+    def qwen_gpu_policy(self) -> Path:
+        return self.config / "qwen-gpu-safety-policy.json"
+
     def ensure(self) -> None:
         for directory in (self.root, self.projects, self.temporary, self.config):
             if directory.is_symlink():

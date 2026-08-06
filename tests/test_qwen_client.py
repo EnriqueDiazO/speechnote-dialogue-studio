@@ -14,6 +14,7 @@ from dialogue_studio.qwen_client import (
     QwenClientConfig,
     QwenClientError,
 )
+from dialogue_studio.qwen_gpu_safety import GpuPreflightResult
 
 
 def config(tmp_path: Path) -> QwenClientConfig:
@@ -111,6 +112,11 @@ def test_backend_start_removes_temporary_start_lock(monkeypatch, tmp_path: Path)
         AppPaths(tmp_path / "Music"),
         settings,
         popen=lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        manager,
+        "preflight",
+        lambda: GpuPreflightResult(allowed=True, timestamp="2026-08-05T00:00:00Z"),
     )
     states = iter(
         (

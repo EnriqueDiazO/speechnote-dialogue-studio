@@ -19,6 +19,8 @@ from typing import Any
 
 from .audio import probe_audio
 from .paths import AppPaths
+from .qwen_gpu_safety import GpuPreflightResult, GpuSafetyPolicy, load_gpu_safety_policy
+from .qwen_preflight import run_gpu_preflight
 from .qwen_service import DEFAULT_MODEL
 from .synthesis import SynthesisBusyError
 
@@ -202,11 +204,13 @@ class QwenBackendManager:
         config: QwenClientConfig | None = None,
         *,
         popen: Any = subprocess.Popen,
+        policy: GpuSafetyPolicy | None = None,
     ) -> None:
         self.paths = paths
         self.config = config or QwenClientConfig.from_env()
         self.client = QwenClient(self.config)
         self._popen = popen
+        self.policy = policy
 
     @property
     def runtime_dir(self) -> Path:
@@ -269,12 +273,25 @@ class QwenBackendManager:
                 "last_error": str(exc) if exc.code != "offline" else None,
             }
 
+    def gpu_policy(self) -> GpuSafetyPolicy:
+        return self.policy or load_gpu_safety_policy(self.paths.qwen_gpu_policy)
+
+    def preflight(self) -> GpuPreflightResult:
+        return run_gpu_preflight(self.gpu_policy(), self.config.python, service_state="offline")
+
     def start(self, *, wait_seconds: float = 30) -> dict[str, Any]:
         current = self.status()
         if current.get("state") != "offline":
             return current
         if not self.config.python.is_file():
             raise QwenClientError(f"No existe el Python Qwen: {self.config.python}")
+        preflight = self.preflight()
+        if not preflight.allowed:
+            detail = preflight.blockers[0] if preflight.blockers else "estado GPU no seguro"
+            raise QwenClientError(
+                "Generación bloqueada para proteger la sesión gráfica. " + detail,
+                code="gpu_preflight_blocked",
+            )
         self.runtime_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         lock_path = self.runtime_dir / "qwen-start.lock"
         with lock_path.open("a+b") as lock:
