@@ -8,6 +8,8 @@ import re
 import unicodedata
 from dataclasses import dataclass
 
+from .linguistics import apply_linguistic_styles
+from .math_speech import verbalize_math
 from .models import (
     MAX_TEXT_LENGTH,
     AppliedPronunciationRule,
@@ -50,7 +52,9 @@ def detect_rule_cycles(rules: list[PronunciationRule]) -> set[str]:
     literal = {
         rule.pattern.casefold(): (rule.replacement.casefold(), rule.rule_id)
         for rule in rules
-        if rule.enabled and rule.kind != "regex" and rule.pattern != rule.replacement
+        if rule.enabled
+        and rule.kind != "regex"
+        and rule.pattern.casefold() != rule.replacement.casefold()
     }
     cyclic: set[str] = set()
     for source, (target, rule_id) in literal.items():
@@ -197,11 +201,24 @@ class PronunciationEngine:
         else:
             chunks: list[str] = []
             applied_list: list[AppliedPronunciationRule] = []
+            unsupported: list[str] = []
             for segment in segment_text(normalized):
                 available_rules = selected_rules
                 if segment.kind in PROTECTED_SEGMENTS:
                     available_rules = [
                         rule for rule in selected_rules if rule.scope == "utterance"
+                    ]
+                elif segment.kind.startswith("math_"):
+                    available_rules = [
+                        rule
+                        for rule in selected_rules
+                        if rule.scope != "builtin" and rule.kind != "math_alias"
+                    ]
+                elif segment.kind == "prose":
+                    available_rules = [
+                        rule
+                        for rule in selected_rules
+                        if rule.kind != "math_alias" and rule.category != "unit"
                     ]
                 transformed, segment_applied = _apply_rules_once(
                     segment.text,
@@ -209,6 +226,61 @@ class PronunciationEngine:
                     selected_profile.language,
                     offset=segment.start,
                 )
+                if segment.kind.startswith("math_"):
+                    aliases = {
+                        rule.pattern: rule.replacement
+                        for rule in selected_rules
+                        if rule.enabled
+                        and rule.kind == "math_alias"
+                        and _language_matches(rule, selected_profile.language)
+                    }
+                    math_result = verbalize_math(
+                        transformed,
+                        language=selected_profile.language,
+                        style=selected_profile.math_style,
+                        number_style=selected_profile.number_style,
+                        aliases=aliases,
+                        source_offset=segment.start,
+                    )
+                    transformed = math_result.spoken_text
+                    warnings.extend(math_result.warnings)
+                    unsupported.extend(math_result.unsupported_fragments)
+                    applied_list.append(
+                        AppliedPronunciationRule(
+                            rule_id=f"builtin-math-{selected_profile.math_style}",
+                            kind="math",
+                            scope="builtin",
+                            source_span=(segment.start, segment.end),
+                            source_text=segment.text,
+                            replacement_text=transformed,
+                            priority=-100,
+                        )
+                    )
+                elif segment.kind == "prose":
+                    known = {
+                        rule.pattern
+                        for rule in selected_rules
+                        if rule.enabled and rule.kind == "acronym"
+                    }
+                    units = {
+                        rule.pattern: rule.replacement
+                        for rule in selected_rules
+                        if rule.enabled
+                        and rule.category == "unit"
+                        and _language_matches(rule, selected_profile.language)
+                    }
+                    transformed, linguistic_applied, linguistic_warnings, candidates = (
+                        apply_linguistic_styles(
+                            transformed,
+                            selected_profile,
+                            known_acronyms=known,
+                            units=units,
+                            source_offset=segment.start,
+                        )
+                    )
+                    applied_list.extend(linguistic_applied)
+                    warnings.extend(linguistic_warnings)
+                    unsupported.extend(candidates)
                 chunks.append(transformed)
                 applied_list.extend(segment_applied)
             spoken = "".join(chunks)
@@ -220,7 +292,13 @@ class PronunciationEngine:
             profile=selected_profile,
             applied_rules=applied,
             warnings=tuple(warnings),
-            unsupported_fragments=(),
+            unsupported_fragments=tuple(
+                dict.fromkeys(
+                    unsupported
+                    if selected_profile.enabled and manual_override is None
+                    else []
+                )
+            ),
             source_hash=source_digest,
             rules_hash=digest,
             engine_version=self.version,
