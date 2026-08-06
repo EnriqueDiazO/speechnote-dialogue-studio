@@ -7,6 +7,7 @@ The HTTP controller owns policy, queue and lifecycle. CUDA exists only in the ch
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import queue
@@ -24,6 +25,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from . import __version__
 from .qwen_gpu_safety import GpuMetricSnapshot, GpuPreflightResult, GpuSafetyPolicy
 from .qwen_preflight import collect_gpu_metrics, collect_kernel_events, run_gpu_preflight
 
@@ -255,6 +257,8 @@ class QwenController:
         self._last_activity_monotonic = time.monotonic()
         self._last_job_timestamp: str | None = None
         self._last_unload_result: dict[str, object] | None = None
+        self._last_timeout: dict[str, object] | None = None
+        self._errors: list[dict[str, object]] = []
         self._model_loaded = False
         self._load_count = 0
         self._capabilities = self._fallback_capabilities()
@@ -377,6 +381,74 @@ class QwenController:
 
     def capabilities(self) -> dict[str, object]:
         return dict(self._capabilities)
+
+    @staticmethod
+    def _sha256(path: Path) -> str | None:
+        try:
+            digest = hashlib.sha256()
+            with path.open("rb") as handle:
+                for block in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(block)
+            return digest.hexdigest()
+        except OSError:
+            return None
+
+    def _diagnostic_outputs(self) -> list[dict[str, object]]:
+        outputs: list[dict[str, object]] = []
+        root = self.config.output_root.resolve()
+        for job in self._known_jobs.values():
+            raw = job.payload.get("output_path")
+            if not isinstance(raw, str):
+                continue
+            try:
+                path = Path(raw).resolve(strict=False)
+                relative = path.relative_to(root).as_posix()
+            except (OSError, ValueError):
+                continue
+            outputs.append(
+                {
+                    "request_id": job.request_id,
+                    "stage": job.stage,
+                    "relative_path": relative,
+                    "sha256": self._sha256(path),
+                }
+            )
+        return outputs
+
+    def diagnostic(self) -> dict[str, object]:
+        """Return a privacy-safe diagnostic; never include script text or audio bytes."""
+
+        preflight = self._last_preflight.to_dict() if self._last_preflight else None
+        return {
+            "schema_version": 1,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "application_version": __version__,
+            "python_version": sys.version.split()[0],
+            "runtime": {
+                "torch": preflight.get("runtime_torch_version") if preflight else None,
+                "cuda": preflight.get("cuda_version") if preflight else None,
+                "driver": preflight.get("driver_version") if preflight else None,
+                "gpu": preflight.get("gpu_name") if preflight else None,
+                "dtype": self.config.dtype,
+                "attention": self.config.attention,
+            },
+            "policy": self.policy.to_dict(),
+            "preflight": preflight,
+            "metrics": [item.to_dict() for item in self._gpu_metrics],
+            "worker": {
+                "pid": self._worker_pid(),
+                "alive": self._worker_pid() is not None,
+                "creation_method": self.creation_method,
+                "model_loaded": self._model_loaded,
+                "load_count": self._load_count,
+                "exit_code": self._last_worker_exit_code,
+                "state": self._state,
+            },
+            "timeout": self._last_timeout,
+            "errors": list(self._errors),
+            "gpu_fault": self._gpu_fault_reason,
+            "outputs": self._diagnostic_outputs(),
+        }
 
     def _reader_loop(
         self,
@@ -516,6 +588,15 @@ class QwenController:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 code = "model_load_timeout" if phase == "loading_model" else "synthesis_timeout"
+                self._last_timeout = {
+                    "code": code,
+                    "phase": phase,
+                    "limit_seconds": (
+                        self.policy.model_load_timeout_seconds
+                        if phase == "loading_model"
+                        else self.policy.synthesis_timeout_seconds
+                    ),
+                }
                 self._terminate_worker(code)
                 raise QwenServiceError(
                     code,
@@ -838,6 +919,14 @@ class QwenController:
                 job.stage = "canceled" if exc.code == "canceled" else "error"
                 job.error = exc
                 self._last_error = str(exc)
+                self._errors.append(
+                    {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "code": exc.code,
+                        "message": str(exc).replace(str(Path.home()), "[HOME]"),
+                    }
+                )
+                self._errors = self._errors[-100:]
                 if self._state not in {"gpu_fault", "blocked"}:
                     self._state = "idle" if exc.retryable else "error"
             except Exception as exc:
@@ -956,6 +1045,8 @@ class QwenRequestHandler(BaseHTTPRequestHandler):
                 self._send(HTTPStatus.OK, self.server.controller.capabilities())
             elif self.path == "/preflight":
                 self._send(HTTPStatus.OK, self.server.controller.preflight().to_dict())
+            elif self.path == "/diagnostic":
+                self._send(HTTPStatus.OK, self.server.controller.diagnostic())
             else:
                 raise QwenServiceError("not_found", "Endpoint desconocido", status=404)
         except QwenServiceError as exc:

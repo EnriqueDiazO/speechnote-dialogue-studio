@@ -6,11 +6,13 @@ import html
 import json
 from collections.abc import Container
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 import streamlit as st
 
+from . import __version__
 from .audio import export_mp3, has_ffmpeg, probe_audio, probe_wave, sha256_file
 from .export import (
     export_project_zip,
@@ -186,6 +188,7 @@ def system_diagnostics() -> dict[str, object]:
             "defaults": dict(DEFAULT_GENERATION_OPTIONS),
         },
         "qwen_preflight": None,
+        "qwen_diagnostic": None,
     }
     try:
         data["flatpak"] = check_flatpak()
@@ -202,6 +205,7 @@ def system_diagnostics() -> dict[str, object]:
         data["qwen"] = qwen.health()
         data["qwen_capabilities"] = qwen.capabilities()
         data["qwen_preflight"] = qwen.preflight()
+        data["qwen_diagnostic"] = qwen.diagnostic()
     except (QwenClientError, ValueError):
         try:
             data["qwen_preflight"] = QwenBackendManager(AppPaths.discover()).preflight().to_dict()
@@ -755,6 +759,44 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
                 st.rerun()
             except (OSError, QwenClientError) as exc:
                 st.error(str(exc))
+
+        raw_diagnostic = diagnostics.get("qwen_diagnostic")
+        if isinstance(raw_diagnostic, dict):
+            diagnostic = raw_diagnostic
+        else:
+            local_policy = status.get("policy")
+            if not isinstance(local_policy, dict):
+                local_policy = GpuSafetyPolicy().to_dict()
+            diagnostic = {
+                "schema_version": 1,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "application_version": __version__,
+                "policy": local_policy,
+                "preflight": preflight or None,
+                "worker": {
+                    key: status.get(key)
+                    for key in (
+                        "state",
+                        "worker_pid",
+                        "worker_alive",
+                        "worker_exit_code",
+                        "model_loaded",
+                    )
+                },
+                "metrics": [status.get("latest_gpu_metric")]
+                if status.get("latest_gpu_metric")
+                else [],
+                "errors": [status.get("last_error")] if status.get("last_error") else [],
+                "outputs": [],
+            }
+        filename_stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        st.download_button(
+            "Descargar diagnóstico",
+            data=json.dumps(diagnostic, ensure_ascii=False, indent=2, sort_keys=True),
+            file_name=f"qwen-gpu-diagnostic-{filename_stamp}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
 
         if allowed and not st.session_state.get("qwen_session_confirmed"):
             st.warning(

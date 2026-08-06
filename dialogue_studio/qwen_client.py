@@ -130,6 +130,9 @@ class QwenClient:
     def preflight(self) -> dict[str, Any]:
         return self._request("GET", "/preflight", timeout=30)
 
+    def diagnostic(self) -> dict[str, Any]:
+        return self._request("GET", "/diagnostic", timeout=30)
+
     def synthesize(
         self,
         *,

@@ -10,7 +10,12 @@ from pathlib import Path
 import pytest
 
 from dialogue_studio.qwen_gpu_safety import GpuPreflightResult, GpuSafetyPolicy
-from dialogue_studio.qwen_service import QwenController, QwenServiceConfig, QwenServiceError
+from dialogue_studio.qwen_service import (
+    QwenController,
+    QwenJob,
+    QwenServiceConfig,
+    QwenServiceError,
+)
 
 
 def config(tmp_path: Path, **policy_changes) -> QwenServiceConfig:
@@ -403,3 +408,30 @@ def test_controller_restarts_worker_after_controlled_stop(tmp_path) -> None:
         assert controller.health()["worker_alive"] is True
     finally:
         controller.close()
+
+
+def test_diagnostic_omits_text_audio_and_absolute_personal_paths(tmp_path) -> None:
+    controller = QwenController(
+        config(tmp_path),
+        preflight_runner=safe_preflight,
+        metric_sampler=safe_metrics,
+        kernel_sampler=no_kernel_events,
+    )
+    output = tmp_path / "temporary" / "test.wav"
+    output.parent.mkdir()
+    output.write_bytes(b"RIFF-not-real-audio")
+    job = QwenJob(
+        "job-safe",
+        {
+            "text": "texto privado que no debe exportarse",
+            "output_path": str(output),
+        },
+        stage="finalized",
+    )
+    controller._known_jobs[job.request_id] = job
+    encoded = json.dumps(controller.diagnostic(), ensure_ascii=False)
+    assert "texto privado" not in encoded
+    assert str(tmp_path) not in encoded
+    assert "temporary/test.wav" in encoded
+    assert output.read_bytes().decode() not in encoded
+    assert controller.diagnostic()["outputs"][0]["sha256"]
