@@ -72,8 +72,20 @@ class AppPaths:
     def temporary(self) -> Path:
         return self.root / "temporary"
 
+    @property
+    def config(self) -> Path:
+        return self.root / "config"
+
+    @property
+    def pronunciation_dictionary(self) -> Path:
+        return self.config / "pronunciation-dictionary.json"
+
+    @property
+    def pronunciation_pending_terms(self) -> Path:
+        return self.config / "pronunciation-pending-terms.json"
+
     def ensure(self) -> None:
-        for directory in (self.root, self.projects, self.temporary):
+        for directory in (self.root, self.projects, self.temporary, self.config):
             if directory.is_symlink():
                 raise ValueError(f"No se permite un enlace simbólico: {directory}")
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)

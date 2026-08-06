@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -23,6 +23,12 @@ from .models import (
     utc_now,
 )
 from .paths import safe_write_path
+from .pronunciation import (
+    PronunciationEngine,
+    PronunciationProfile,
+    PronunciationResult,
+    PronunciationRule,
+)
 from .qwen_client import synthesize_qwen_text
 from .qwen_service import DEFAULT_GENERATION_OPTIONS
 from .speechnote import synthesize_text
@@ -33,6 +39,9 @@ from .synthesis import SynthesisBusyError
 class GenerationPaths:
     raw: Path
     normalized: Path
+
+
+_UNSET = object()
 
 
 def update_utterance(
@@ -126,7 +135,151 @@ def update_utterance_tts_override(
     project.touch()
 
 
-def audio_input_fingerprint(project: DialogueProject, utterance: Utterance) -> str:
+def effective_pronunciation_result(
+    project: DialogueProject,
+    utterance: Utterance,
+    *,
+    global_rules: list[PronunciationRule] | tuple[PronunciationRule, ...] = (),
+    engine: PronunciationEngine | None = None,
+) -> PronunciationResult:
+    profile = project.pronunciation_profile
+    if not utterance.use_pronunciation_engine:
+        profile = replace(profile, enabled=False)
+    processor = engine or PronunciationEngine()
+    return processor.transform(
+        utterance.text,
+        profile=profile,
+        rules=[*global_rules, *project.pronunciation_rules, *utterance.utterance_rules],
+        manual_override=utterance.manual_spoken_text_override,
+    )
+
+
+def persist_pronunciation_result(
+    utterance: Utterance,
+    result: PronunciationResult,
+) -> None:
+    utterance.spoken_text = result.spoken_text
+    utterance.written_text_hash = result.source_hash
+    utterance.spoken_text_hash = hashlib.sha256(
+        result.spoken_text.encode("utf-8")
+    ).hexdigest()
+    utterance.pronunciation_rules_hash = result.rules_hash
+    utterance.pronunciation_engine_version = result.engine_version
+    utterance.applied_pronunciation_rule_ids = [
+        item.rule_id for item in result.applied_rules
+    ]
+    utterance.pronunciation_warnings = [asdict(item) for item in result.warnings]
+
+
+def _pronunciation_effect_signature(result: PronunciationResult) -> tuple[object, ...]:
+    return (
+        result.spoken_text,
+        tuple(item.rule_id for item in result.applied_rules),
+        tuple((item.code, item.fragment) for item in result.warnings),
+        result.unsupported_fragments,
+    )
+
+
+def update_project_pronunciation_rules(
+    project: DialogueProject,
+    rules: list[PronunciationRule],
+    *,
+    global_rules: list[PronunciationRule] | tuple[PronunciationRule, ...] = (),
+) -> list[str]:
+    for rule in rules:
+        rule.validate()
+        if rule.scope != "project":
+            raise ValueError("Las reglas del proyecto necesitan alcance project")
+    before = {
+        utterance.utterance_id: _pronunciation_effect_signature(
+            effective_pronunciation_result(project, utterance, global_rules=global_rules)
+        )
+        for utterance in project.utterances
+    }
+    project.pronunciation_rules = deepcopy(rules)
+    affected: list[str] = []
+    for utterance in project.utterances:
+        after = _pronunciation_effect_signature(
+            effective_pronunciation_result(project, utterance, global_rules=global_rules)
+        )
+        if before[utterance.utterance_id] != after:
+            utterance.mark_stale()
+            affected.append(utterance.utterance_id)
+    project.touch()
+    return affected
+
+
+def mark_global_pronunciation_change(
+    project: DialogueProject,
+    *,
+    old_rules: list[PronunciationRule] | tuple[PronunciationRule, ...],
+    new_rules: list[PronunciationRule] | tuple[PronunciationRule, ...],
+) -> list[str]:
+    affected: list[str] = []
+    for utterance in project.utterances:
+        before = effective_pronunciation_result(project, utterance, global_rules=old_rules)
+        after = effective_pronunciation_result(project, utterance, global_rules=new_rules)
+        if _pronunciation_effect_signature(before) != _pronunciation_effect_signature(after):
+            utterance.mark_stale()
+            affected.append(utterance.utterance_id)
+    if affected:
+        project.touch()
+    return affected
+
+
+def update_pronunciation_profile(
+    project: DialogueProject,
+    profile: PronunciationProfile,
+) -> None:
+    profile.validate()
+    if project.pronunciation_profile == profile:
+        return
+    project.pronunciation_profile = profile
+    for utterance in project.utterances:
+        utterance.mark_stale()
+    project.touch()
+
+
+def update_utterance_pronunciation(
+    project: DialogueProject,
+    utterance_id: str,
+    *,
+    enabled: bool | None = None,
+    manual_override: str | None | object = _UNSET,
+    rules: list[PronunciationRule] | None = None,
+    global_rules: list[PronunciationRule] | tuple[PronunciationRule, ...] = (),
+) -> None:
+    utterance = next(item for item in project.utterances if item.utterance_id == utterance_id)
+    before = _pronunciation_effect_signature(
+        effective_pronunciation_result(project, utterance, global_rules=global_rules)
+    )
+    if enabled is not None:
+        utterance.use_pronunciation_engine = enabled
+    if manual_override is not _UNSET:
+        utterance.manual_spoken_text_override = (
+            str(manual_override).strip() if manual_override else None
+        )
+    if rules is not None:
+        for rule in rules:
+            rule.validate()
+            if rule.scope != "utterance":
+                raise ValueError("Las reglas de intervención necesitan alcance utterance")
+        utterance.utterance_rules = deepcopy(rules)
+    after = _pronunciation_effect_signature(
+        effective_pronunciation_result(project, utterance, global_rules=global_rules)
+    )
+    if before != after:
+        utterance.mark_stale()
+    project.touch()
+
+
+def audio_input_fingerprint(
+    project: DialogueProject,
+    utterance: Utterance,
+    *,
+    global_rules: list[PronunciationRule] | tuple[PronunciationRule, ...] = (),
+    pronunciation_engine: PronunciationEngine | None = None,
+) -> str:
     speaker = project.speaker(utterance.speaker_id)
     config = effective_tts_config(project, utterance)
     provider_model = (
@@ -137,8 +290,18 @@ def audio_input_fingerprint(project: DialogueProject, utterance: Utterance) -> s
     generation_options = dict(config.generation_options)
     if config.provider == "qwen":
         generation_options = {**DEFAULT_GENERATION_OPTIONS, **generation_options}
+    pronunciation = effective_pronunciation_result(
+        project,
+        utterance,
+        global_rules=global_rules,
+        engine=pronunciation_engine,
+    )
     payload = {
-        "text": utterance.text,
+        "written_text": utterance.text,
+        "spoken_text": pronunciation.spoken_text,
+        "pronunciation_profile": pronunciation.profile.to_dict(),
+        "pronunciation_rules_hash": pronunciation.rules_hash,
+        "manual_spoken_text_override": utterance.manual_spoken_text_override,
         "speaker_id": speaker.speaker_id,
         "speaker_name": speaker.name,
         "provider": config.provider,
@@ -217,6 +380,13 @@ def duplicate_utterance(project: DialogueProject, utterance_id: str) -> Utteranc
     duplicate.duration_seconds = None
     duplicate.sha256 = None
     duplicate.audio_fingerprint = None
+    duplicate.spoken_text = None
+    duplicate.written_text_hash = None
+    duplicate.spoken_text_hash = None
+    duplicate.pronunciation_rules_hash = None
+    duplicate.pronunciation_engine_version = None
+    duplicate.applied_pronunciation_rule_ids = []
+    duplicate.pronunciation_warnings = []
     duplicate.status = "draft"
     duplicate.error_message = None
     duplicate.created_at = utc_now()

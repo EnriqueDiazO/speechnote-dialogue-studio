@@ -66,6 +66,9 @@ class PronunciationRule:
     notes: str = ""
     created_at: str = field(default_factory=pronunciation_now)
     updated_at: str = field(default_factory=pronunciation_now)
+    usage_count: int = 0
+    last_used_at: str | None = None
+    change_history: tuple[dict[str, str], ...] = ()
 
     @classmethod
     def create(
@@ -123,6 +126,19 @@ class PronunciationRule:
             notes=str(data.get("notes", "")).strip(),
             created_at=str(data.get("created_at", pronunciation_now())),
             updated_at=str(data.get("updated_at", pronunciation_now())),
+            usage_count=int(data.get("usage_count", 0)),
+            last_used_at=(
+                str(data["last_used_at"]) if data.get("last_used_at") else None
+            ),
+            change_history=tuple(
+                {
+                    str(key): str(value)
+                    for key, value in entry.items()
+                    if isinstance(key, str)
+                }
+                for entry in data.get("change_history", [])
+                if isinstance(entry, dict)
+            ),
         )
         if expected_scope is not None and rule.scope != expected_scope:
             raise ValueError(f"Se esperaba una regla de alcance {expected_scope}")
@@ -147,11 +163,30 @@ class PronunciationRule:
             raise ValueError("La categoría es demasiado larga")
         if not -10_000 <= self.priority <= 10_000:
             raise ValueError("La prioridad debe estar entre -10000 y 10000")
+        if self.usage_count < 0:
+            raise ValueError("El contador de uso no puede ser negativo")
+        if len(self.change_history) > 1_000:
+            raise ValueError("El historial de la regla es demasiado largo")
         if self.kind == "regex":
             _validate_regex(self.pattern)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    def behavior_dict(self) -> dict[str, Any]:
+        """Return only fields that can change spoken output."""
+        return {
+            "rule_id": self.rule_id,
+            "scope": self.scope,
+            "language": self.language,
+            "kind": self.kind,
+            "pattern": self.pattern,
+            "replacement": self.replacement,
+            "enabled": self.enabled,
+            "priority": self.priority,
+            "case_sensitive": self.case_sensitive,
+            "whole_word": self.whole_word,
+        }
 
 
 @dataclass(frozen=True)

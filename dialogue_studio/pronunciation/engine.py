@@ -43,7 +43,7 @@ def _canonical_hash(value: object) -> str:
 
 
 def rules_hash(rules: list[PronunciationRule]) -> str:
-    active = [rule.to_dict() for rule in rules if rule.enabled]
+    active = [rule.behavior_dict() for rule in rules if rule.enabled]
     active.sort(key=lambda item: str(item["rule_id"]))
     return _canonical_hash(active)
 

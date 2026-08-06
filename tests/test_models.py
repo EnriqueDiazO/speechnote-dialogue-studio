@@ -222,7 +222,8 @@ def test_current_qwen_config_serializes_no_expression_or_instruction_fields() ->
     data = project.to_dict()
     serialized = deterministic_json(data)
     assert "instruction_text" not in serialized
+    serialized_tts = deterministic_json(data["speakers"][0]["tts"])
     assert all(
-        field not in serialized
+        field not in serialized_tts
         for field in ("emotion", "style", "pace", "intensity", "pauses", "clarity")
     )

@@ -213,6 +213,8 @@ def build_manifest(
         "project_id": project.project_id,
         "title": project.title,
         "language": project.language,
+        "pronunciation_profile": project_data["pronunciation_profile"],
+        "pronunciation_rules": project_data["pronunciation_rules"],
         "created_at": project.created_at,
         "updated_at": project.updated_at,
         "speakers": project_data["speakers"],

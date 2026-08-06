@@ -8,6 +8,8 @@ from pathlib import PurePosixPath
 from typing import Any, Literal
 from uuid import UUID, uuid4
 
+from .pronunciation import PronunciationProfile, PronunciationRule
+
 SCHEMA_VERSION = 1
 UTTERANCE_STATES = {"draft", "generating", "ready", "error", "stale"}
 RECOVERABLE_SYNTHESIS_MESSAGE = (
@@ -218,6 +220,16 @@ class Utterance:
     updated_at: str = field(default_factory=utc_now)
     tts_override: UtteranceTTSOverride | None = None
     audio_fingerprint: str | None = None
+    use_pronunciation_engine: bool = True
+    manual_spoken_text_override: str | None = None
+    utterance_rules: list[PronunciationRule] = field(default_factory=list)
+    spoken_text: str | None = None
+    written_text_hash: str | None = None
+    spoken_text_hash: str | None = None
+    pronunciation_rules_hash: str | None = None
+    pronunciation_engine_version: str | None = None
+    applied_pronunciation_rule_ids: list[str] = field(default_factory=list)
+    pronunciation_warnings: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def create(cls, order: int, speaker_id: str, text: str = "") -> Utterance:
@@ -227,7 +239,14 @@ class Utterance:
     def from_dict(cls, data: dict[str, Any]) -> Utterance:
         fields = set(cls.__dataclass_fields__)
         values = {key: value for key, value in data.items() if key in fields}
+        if "text" not in values and "written_text" in data:
+            values["text"] = str(data["written_text"])
         values["tts_override"] = UtteranceTTSOverride.from_dict(data.get("tts_override"))
+        values["utterance_rules"] = [
+            PronunciationRule.from_dict(item, expected_scope="utterance")
+            for item in data.get("utterance_rules", [])
+            if isinstance(item, dict)
+        ]
         return cls(**values)
 
     def validate(self) -> None:
@@ -242,6 +261,10 @@ class Utterance:
         validate_relative_path(self.audio_relative_path)
         if self.tts_override is not None:
             self.tts_override.validate()
+        for rule in self.utterance_rules:
+            rule.validate()
+            if rule.scope != "utterance":
+                raise ValueError("Las reglas de intervención necesitan alcance utterance")
 
     def mark_stale(self) -> None:
         if self.audio_relative_path or self.status == "ready":
@@ -264,6 +287,10 @@ class DialogueProject:
     utterances: list[Utterance]
     created_at: str
     updated_at: str
+    pronunciation_profile: PronunciationProfile = field(
+        default_factory=PronunciationProfile
+    )
+    pronunciation_rules: list[PronunciationRule] = field(default_factory=list)
 
     @classmethod
     def new(cls, title: str = "Diálogo sin título") -> DialogueProject:
@@ -291,6 +318,7 @@ class DialogueProject:
             utterances=[Utterance.create(1, professor.speaker_id)],
             created_at=now,
             updated_at=now,
+            pronunciation_profile=PronunciationProfile.for_language("es-MX"),
         )
 
     @classmethod
@@ -339,6 +367,15 @@ class DialogueProject:
             utterances=utterances,
             created_at=data.get("created_at", utc_now()),
             updated_at=data.get("updated_at", utc_now()),
+            pronunciation_profile=PronunciationProfile.from_dict(
+                data.get("pronunciation_profile"),
+                fallback_language=str(data.get("language", "es-MX")),
+            ),
+            pronunciation_rules=[
+                PronunciationRule.from_dict(item, expected_scope="project")
+                for item in data.get("pronunciation_rules", [])
+                if isinstance(item, dict)
+            ],
         )
         project.validate()
         return project
@@ -350,6 +387,7 @@ class DialogueProject:
             if isinstance(tts, dict) and tts.get("instruction_text") is None:
                 tts.pop("instruction_text", None)
         for utterance in data["utterances"]:
+            utterance["written_text"] = utterance["text"]
             override = utterance.get("tts_override")
             if override is None:
                 utterance.pop("tts_override", None)
@@ -395,6 +433,11 @@ class DialogueProject:
             utterance.validate()
             if utterance.speaker_id not in known_speakers:
                 raise ValueError("Una intervención referencia un hablante inexistente")
+        self.pronunciation_profile.validate()
+        for rule in self.pronunciation_rules:
+            rule.validate()
+            if rule.scope != "project":
+                raise ValueError("Las reglas del proyecto necesitan alcance project")
         if require_utterance and not self.utterances:
             raise ValueError("Se necesita al menos una intervención para exportar")
 

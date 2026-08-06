@@ -49,12 +49,14 @@ def test_portable_zip_manifest_scripts_and_deterministic_order(make_wav, tmp_pat
     project_dir = tmp_path / "project"
     project_dir.mkdir()
     project, master = _ready_project(make_wav, project_dir)
+    project.utterances[0].spoken_text = "Texto hablado derivado"
     first = project_dir / "exports" / "first.zip"
     second = project_dir / "exports" / "second.zip"
     _, manifest = export_project_zip(project, project_dir, first, master_wav=master)
     export_project_zip(project, project_dir, second, master_wav=master)
     assert first.read_bytes() == second.read_bytes()
     assert manifest["format"] == "speechnote-dialogue-studio-project"
+    assert manifest["pronunciation_profile"]["enabled"] is True
     assert manifest["pending_utterance_ids"] == []
     assert manifest["ready_utterance_ids"] == [
         utterance.utterance_id for utterance in project.utterances
@@ -70,6 +72,8 @@ def test_portable_zip_manifest_scripts_and_deterministic_order(make_wav, tmp_pat
         assert "speech-dialogue-project/script/dialogue.txt" in names
         assert len([name for name in names if "/audio/segments/" in name]) == 3
         portable = json.loads(archive.read("speech-dialogue-project/project.json"))
+        assert portable["utterances"][0]["written_text"] == project.utterances[0].text
+        assert portable["utterances"][0]["spoken_text"] == "Texto hablado derivado"
         assert all(
             item["audio_relative_path"].startswith("audio/segments/")
             for item in portable["utterances"]
