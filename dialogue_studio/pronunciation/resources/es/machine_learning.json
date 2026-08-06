@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "language": "es",
+  "category": "machine_learning",
+  "rules": [
+    {"kind": "acronym", "pattern": "ReLU", "replacement": "re lu"},
+    {"kind": "acronym", "pattern": "MSE", "replacement": "eme ese e"},
+    {"kind": "acronym", "pattern": "MAE", "replacement": "eme a e"},
+    {"kind": "acronym", "pattern": "SGD", "replacement": "ese ge de"},
+    {"kind": "acronym", "pattern": "CNN", "replacement": "ce ene ene"},
+    {"kind": "acronym", "pattern": "RNN", "replacement": "erre ene ene"},
+    {"kind": "acronym", "pattern": "LSTM", "replacement": "ele ese te eme"},
+    {"kind": "phrase", "pattern": "Adam", "replacement": "ádam", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "softmax", "replacement": "soft max", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "backpropagation", "replacement": "retropropagación", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "dropout", "replacement": "drop aut", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "batch normalization", "replacement": "normalización por lotes", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "Transformer", "replacement": "transformer", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "embedding", "replacement": "representación vectorial", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "gradient descent", "replacement": "descenso de gradiente", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "learning rate", "replacement": "tasa de aprendizaje", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "loss", "replacement": "pérdida", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "epoch", "replacement": "época", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "batch", "replacement": "lote", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "p-value", "replacement": "valor pe", "case_sensitive": false, "category": "statistics"},
+    {"kind": "acronym", "pattern": "FDR", "replacement": "efe de erre", "category": "statistics"}
+  ]
+}

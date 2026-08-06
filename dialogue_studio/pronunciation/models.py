@@ -62,6 +62,7 @@ class PronunciationRule:
     priority: int = 0
     case_sensitive: bool = False
     whole_word: bool = True
+    category: str = "custom"
     notes: str = ""
     created_at: str = field(default_factory=pronunciation_now)
     updated_at: str = field(default_factory=pronunciation_now)
@@ -78,6 +79,7 @@ class PronunciationRule:
         priority: int = 0,
         case_sensitive: bool = False,
         whole_word: bool = True,
+        category: str = "custom",
         notes: str = "",
         enabled: bool = True,
     ) -> PronunciationRule:
@@ -92,6 +94,7 @@ class PronunciationRule:
             priority=priority,
             case_sensitive=case_sensitive,
             whole_word=whole_word,
+            category=category.strip() or "custom",
             notes=notes.strip(),
         )
         rule.validate()
@@ -116,6 +119,7 @@ class PronunciationRule:
             priority=int(data.get("priority", 0)),
             case_sensitive=bool(data.get("case_sensitive", False)),
             whole_word=bool(data.get("whole_word", True)),
+            category=str(data.get("category", "custom")).strip() or "custom",
             notes=str(data.get("notes", "")).strip(),
             created_at=str(data.get("created_at", pronunciation_now())),
             updated_at=str(data.get("updated_at", pronunciation_now())),
@@ -139,6 +143,8 @@ class PronunciationRule:
             raise ValueError("El patrón debe tener entre 1 y 512 caracteres")
         if len(self.replacement) > MAX_REPLACEMENT_LENGTH:
             raise ValueError("La pronunciación es demasiado larga")
+        if len(self.category) > 80:
+            raise ValueError("La categoría es demasiado larga")
         if not -10_000 <= self.priority <= 10_000:
             raise ValueError("La prioridad debe estar entre -10000 y 10000")
         if self.kind == "regex":

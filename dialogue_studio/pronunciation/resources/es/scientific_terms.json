@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "language": "es",
+  "category": "scientific",
+  "rules": [
+    {"kind": "phrase", "pattern": "eigenvalue", "replacement": "valor propio", "category": "linear_algebra"},
+    {"kind": "phrase", "pattern": "eigenvector", "replacement": "vector propio", "category": "linear_algebra"},
+    {"kind": "phrase", "pattern": "inner product", "replacement": "producto interno", "category": "linear_algebra"},
+    {"kind": "phrase", "pattern": "transpose", "replacement": "transpuesta", "category": "linear_algebra"},
+    {"kind": "phrase", "pattern": "inverse", "replacement": "inversa", "category": "linear_algebra"},
+    {"kind": "phrase", "pattern": "mean", "replacement": "media", "category": "statistics"},
+    {"kind": "phrase", "pattern": "median", "replacement": "mediana", "category": "statistics"},
+    {"kind": "phrase", "pattern": "standard deviation", "replacement": "desviación estándar", "category": "statistics"},
+    {"kind": "phrase", "pattern": "correlation", "replacement": "correlación", "category": "statistics"}
+  ]
+}

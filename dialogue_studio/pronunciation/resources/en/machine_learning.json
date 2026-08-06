@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "language": "en",
+  "category": "machine_learning",
+  "rules": [
+    {"kind": "acronym", "pattern": "ReLU", "replacement": "ree loo"},
+    {"kind": "acronym", "pattern": "MSE", "replacement": "em ess ee"},
+    {"kind": "acronym", "pattern": "MAE", "replacement": "em ay ee"},
+    {"kind": "acronym", "pattern": "SGD", "replacement": "ess gee dee"},
+    {"kind": "acronym", "pattern": "CNN", "replacement": "see en en"},
+    {"kind": "acronym", "pattern": "RNN", "replacement": "ar en en"},
+    {"kind": "acronym", "pattern": "LSTM", "replacement": "el ess tee em"},
+    {"kind": "phrase", "pattern": "Adam", "replacement": "Adam", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "softmax", "replacement": "soft max", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "backpropagation", "replacement": "back propagation", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "dropout", "replacement": "dropout", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "batch normalization", "replacement": "batch normalization", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "Transformer", "replacement": "transformer", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "embedding", "replacement": "embedding", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "gradient descent", "replacement": "gradient descent", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "learning rate", "replacement": "learning rate", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "loss", "replacement": "loss", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "epoch", "replacement": "epoch", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "batch", "replacement": "batch", "case_sensitive": false},
+    {"kind": "phrase", "pattern": "p-value", "replacement": "p value", "case_sensitive": false, "category": "statistics"},
+    {"kind": "acronym", "pattern": "FDR", "replacement": "eff dee ar", "category": "statistics"}
+  ]
+}

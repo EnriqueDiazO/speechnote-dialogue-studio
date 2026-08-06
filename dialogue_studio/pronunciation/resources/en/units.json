@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "language": "en",
+  "category": "unit",
+  "rules": [
+    {"kind": "literal", "pattern": "Hz", "replacement": "hertz"},
+    {"kind": "literal", "pattern": "kHz", "replacement": "kilohertz"},
+    {"kind": "literal", "pattern": "MHz", "replacement": "megahertz"},
+    {"kind": "literal", "pattern": "GB", "replacement": "gigabytes"},
+    {"kind": "literal", "pattern": "MB", "replacement": "megabytes"},
+    {"kind": "literal", "pattern": "ms", "replacement": "milliseconds"},
+    {"kind": "literal", "pattern": "s", "replacement": "seconds"},
+    {"kind": "literal", "pattern": "min", "replacement": "minutes"},
+    {"kind": "literal", "pattern": "h", "replacement": "hours"},
+    {"kind": "literal", "pattern": "m", "replacement": "meters"},
+    {"kind": "literal", "pattern": "kg", "replacement": "kilograms"},
+    {"kind": "literal", "pattern": "cm", "replacement": "centimeters"},
+    {"kind": "literal", "pattern": "mm", "replacement": "millimeters"},
+    {"kind": "literal", "pattern": "g", "replacement": "grams"},
+    {"kind": "literal", "pattern": "°C", "replacement": "degrees Celsius", "whole_word": false}
+  ]
+}

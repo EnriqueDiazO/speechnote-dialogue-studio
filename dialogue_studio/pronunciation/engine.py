@@ -16,6 +16,7 @@ from .models import (
     PronunciationRule,
     PronunciationWarning,
 )
+from .segmentation import PROTECTED_SEGMENTS, segment_text
 
 ENGINE_VERSION = "1.0"
 SCOPE_RANK = {"builtin": 0, "global": 1, "project": 2, "utterance": 3}
@@ -149,7 +150,9 @@ class PronunciationEngine:
         normalized = unicodedata.normalize("NFC", written_text)
         if len(normalized) > MAX_TEXT_LENGTH:
             raise ValueError(f"El texto supera el límite de {MAX_TEXT_LENGTH} caracteres")
-        selected_rules = list(rules or [])
+        from .glossary import builtin_rules
+
+        selected_rules = [*builtin_rules(selected_profile.language), *(rules or [])]
         for rule in selected_rules:
             rule.validate()
         digest = rules_hash(selected_rules)
@@ -192,11 +195,23 @@ class PronunciationEngine:
             spoken = normalized
             applied = ()
         else:
-            spoken, applied_list = _apply_rules_once(
-                normalized,
-                selected_rules,
-                selected_profile.language,
-            )
+            chunks: list[str] = []
+            applied_list: list[AppliedPronunciationRule] = []
+            for segment in segment_text(normalized):
+                available_rules = selected_rules
+                if segment.kind in PROTECTED_SEGMENTS:
+                    available_rules = [
+                        rule for rule in selected_rules if rule.scope == "utterance"
+                    ]
+                transformed, segment_applied = _apply_rules_once(
+                    segment.text,
+                    available_rules,
+                    selected_profile.language,
+                    offset=segment.start,
+                )
+                chunks.append(transformed)
+                applied_list.extend(segment_applied)
+            spoken = "".join(chunks)
             applied = tuple(applied_list)
         return PronunciationResult(
             written_text=normalized,

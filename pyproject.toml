@@ -16,6 +16,9 @@ dev = ["pytest>=8,<9", "ruff>=0.12,<1"]
 [tool.setuptools.packages.find]
 include = ["dialogue_studio*"]
 
+[tool.setuptools.package-data]
+"dialogue_studio.pronunciation" = ["resources/**/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
@@ -25,4 +28,3 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
-
