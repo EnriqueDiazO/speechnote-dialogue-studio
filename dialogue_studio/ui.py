@@ -29,6 +29,11 @@ from .models import (
     effective_tts_config,
 )
 from .paths import AppPaths
+from .pronunciation.import_export import (
+    GlobalPronunciationStore,
+    PendingTermStore,
+)
+from .pronunciation.ui import render_pronunciation, render_utterance_pronunciation
 from .qwen_client import QwenBackendManager, QwenClient, QwenClientError
 from .qwen_preview import QwenPreview, clear_qwen_previews, generate_qwen_previews
 from .qwen_service import (
@@ -212,6 +217,8 @@ def _apply_project_widget_reset() -> None:
         "description-",
         "pause-",
         "new-speaker-",
+        "pronunciation-project-",
+        "utterance-pronunciation-",
     )
     for key in list(st.session_state):
         if key.startswith(prefixes):
@@ -247,6 +254,16 @@ def _init_state() -> tuple[AppPaths, ProjectStore]:
         st.session_state.qwen_gallery_options = dict(DEFAULT_GENERATION_OPTIONS)
     if "speechnote_voice_catalog" not in st.session_state:
         st.session_state.speechnote_voice_catalog = {}
+    if "global_pronunciation_rules" not in st.session_state:
+        loaded_dictionary = GlobalPronunciationStore(paths).load()
+        st.session_state.global_pronunciation_rules = list(loaded_dictionary.rules)
+        st.session_state.pronunciation_store_warnings = list(loaded_dictionary.warnings)
+    if "pronunciation_pending_terms" not in st.session_state:
+        st.session_state.pronunciation_pending_terms = list(PendingTermStore(paths).load())
+    if "pronunciation_preview_result" not in st.session_state:
+        st.session_state.pronunciation_preview_result = None
+    if "pronunciation_import_preview" not in st.session_state:
+        st.session_state.pronunciation_import_preview = None
     _apply_project_widget_reset()
     GLOBAL_SYNTHESIS_COORDINATOR.clear_abandoned()
     return paths, store
@@ -858,14 +875,21 @@ def _sampling_controls(
     )
 
 
-def _test_voice(paths: AppPaths, speaker: SpeakerProfile) -> None:
+def _test_voice(
+    paths: AppPaths,
+    speaker: SpeakerProfile,
+    *,
+    text: str | None = None,
+    state_key: str = "preview_voice",
+) -> None:
     config = speaker.tts_config
     destination = paths.temporary / f"voice-test-{uuid4().hex}.wav"
+    test_text = text or f"Hola, soy {speaker.name}. Esta es una prueba de voz."
     with st.spinner(f"Probando la voz de {speaker.name}…"):
         if config.provider == "qwen":
             def action() -> object:
                 return QwenClient().synthesize(
-                    text=f"Hola, soy {speaker.name}. Esta es una prueba de voz.",
+                    text=test_text,
                     speaker=config.voice_id,
                     language=config.language,
                     generation_options=_qwen_defaults(config),
@@ -875,7 +899,7 @@ def _test_voice(paths: AppPaths, speaker: SpeakerProfile) -> None:
             def action() -> object:
                 return synthesize_text(
                     config.voice_id,
-                    f"Hola, soy {speaker.name}. Esta es una prueba de voz.",
+                    test_text,
                     destination,
                     paths.root,
                     probe=probe_audio,
@@ -888,7 +912,7 @@ def _test_voice(paths: AppPaths, speaker: SpeakerProfile) -> None:
             action,
         )
         probe_audio(destination)
-    previous = st.session_state.preview_voice
+    previous = st.session_state.get(state_key)
     if previous:
         previous_path = Path(previous)
         if (
@@ -897,7 +921,7 @@ def _test_voice(paths: AppPaths, speaker: SpeakerProfile) -> None:
             and previous_path.suffix == ".wav"
         ):
             previous_path.unlink(missing_ok=True)
-    st.session_state.preview_voice = str(destination)
+    st.session_state[state_key] = str(destination)
     st.toast("Prueba de voz lista")
 
 
@@ -1700,6 +1724,13 @@ def _render_utterances(
                     diagnostics,
                     disabled=not utterance_capabilities.can_edit,
                 )
+            with st.expander("Pronunciación"):
+                render_utterance_pronunciation(
+                    project,
+                    utterance,
+                    paths,
+                    disabled=not utterance_capabilities.can_edit,
+                )
             if utterance.duration_seconds is not None:
                 st.caption(f"Duración · {utterance.duration_seconds:.2f} s")
             if capabilities.active_utterance_id == utterance.utterance_id:
@@ -1955,6 +1986,18 @@ def main() -> None:
     _render_header(project, capabilities)
     _render_qwen_backend(paths, diagnostics)
     _render_recovery(project, store, capabilities)
+    st.divider()
+    render_pronunciation(
+        project,
+        paths,
+        capabilities,
+        lambda speaker, text: _test_voice(
+            paths,
+            speaker,
+            text=text,
+            state_key="pronunciation_preview_audio",
+        ),
+    )
     st.divider()
     _render_speakers(project, paths, diagnostics, capabilities)
     _render_qwen_gallery(project, paths, diagnostics, capabilities)
