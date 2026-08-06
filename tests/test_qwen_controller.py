@@ -238,6 +238,45 @@ class SimulatedWorkerProcess:
         return self.returncode
 
 
+class SilentWorkerProcess(SimulatedWorkerProcess):
+    def __init__(self, *, announce_generation: bool = False) -> None:
+        super().__init__()
+        self.announce_generation = announce_generation
+
+    def write(self, line: str) -> int:
+        command = json.loads(line)
+        if command["command"] == "synthesize" and self.announce_generation:
+            self.stdout.send(
+                {
+                    "event": "status",
+                    "state": "generating",
+                    "request_id": command["request_id"],
+                }
+            )
+        return len(line)
+
+
+class DeadWorkerProcess(SimulatedWorkerProcess):
+    def write(self, line: str) -> int:
+        command = json.loads(line)
+        if command["command"] == "synthesize":
+            self.returncode = 7
+            self.stdout.close()
+        return len(line)
+
+
+class HangingWorkerProcess(SimulatedWorkerProcess):
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def wait(self, timeout=None):
+        if self.returncode is None:
+            import subprocess
+
+            raise subprocess.TimeoutExpired("worker", timeout)
+        return self.returncode
+
+
 def test_concurrent_requests_use_one_worker_and_one_synthesis_at_a_time(tmp_path) -> None:
     processes = []
 
@@ -435,3 +474,89 @@ def test_diagnostic_omits_text_audio_and_absolute_personal_paths(tmp_path) -> No
     assert "temporary/test.wav" in encoded
     assert output.read_bytes().decode() not in encoded
     assert controller.diagnostic()["outputs"][0]["sha256"]
+
+
+@pytest.mark.parametrize(
+    ("process", "policy", "expected"),
+    (
+        (
+            SilentWorkerProcess(),
+            {"model_load_timeout_seconds": 0},
+            "model_load_timeout",
+        ),
+        (
+            SilentWorkerProcess(announce_generation=True),
+            {"model_load_timeout_seconds": 1, "synthesis_timeout_seconds": 0},
+            "synthesis_timeout",
+        ),
+        (DeadWorkerProcess(), {}, "worker_dead"),
+    ),
+)
+def test_worker_timeout_and_death_are_recovered(
+    process, policy, expected, tmp_path
+) -> None:
+    controller = QwenController(
+        config(tmp_path, **policy),
+        popen=lambda *_args, **_kwargs: process,
+        preflight_runner=safe_preflight,
+        metric_sampler=safe_metrics,
+        kernel_sampler=no_kernel_events,
+    )
+    controller.start()
+    try:
+        with pytest.raises(QwenServiceError) as error:
+            controller.submit({"text": "timeout"})
+        assert error.value.code == expected
+        assert controller.health()["worker_alive"] is False
+    finally:
+        controller.close()
+
+
+def test_hung_worker_escalates_only_its_owned_process_to_kill(tmp_path) -> None:
+    process = HangingWorkerProcess()
+    controller = QwenController(
+        config(tmp_path, terminate_grace_seconds=0.01),
+        popen=lambda *_args, **_kwargs: process,
+        preflight_runner=safe_preflight,
+        metric_sampler=safe_metrics,
+        kernel_sampler=no_kernel_events,
+    )
+    controller._start_worker()
+    controller._terminate_worker("test_hang")
+    assert process.terminated is True
+    assert process.killed is True
+    assert controller.health()["worker_alive"] is False
+
+
+def test_cancel_current_job_terminates_worker_and_releases_request(tmp_path) -> None:
+    release = threading.Event()
+    process = SimulatedWorkerProcess(release=release)
+    controller = QwenController(
+        config(tmp_path),
+        popen=lambda *_args, **_kwargs: process,
+        preflight_runner=safe_preflight,
+        metric_sampler=safe_metrics,
+        kernel_sampler=no_kernel_events,
+    )
+    controller.start()
+    outcome = []
+
+    def submit() -> None:
+        try:
+            controller.submit({"text": "cancel"})
+        except QwenServiceError as exc:
+            outcome.append(exc.code)
+
+    thread = threading.Thread(target=submit)
+    try:
+        thread.start()
+        assert process.started.wait(timeout=1)
+        result = controller.cancel(stop_current=True)
+        assert result["current_cancel_requested"] is True
+        thread.join(timeout=2)
+        assert outcome == ["canceled"]
+        assert process.terminated is True
+        assert controller.health()["queue"] == []
+    finally:
+        release.set()
+        controller.close()

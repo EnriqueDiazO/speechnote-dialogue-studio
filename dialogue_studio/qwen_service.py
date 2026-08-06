@@ -714,8 +714,6 @@ class QwenController:
         )
         self._gpu_metrics.append(snapshot)
         self._gpu_metrics = self._gpu_metrics[-1000:]
-        if not worker_alive:
-            return "El worker Qwen terminó durante el monitoreo"
         if new_xids:
             return (
                 "Se detectó un Xid nuevo durante la inferencia. No se iniciarán más trabajos; "
