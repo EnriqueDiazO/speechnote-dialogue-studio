@@ -560,3 +560,56 @@ def test_cancel_current_job_terminates_worker_and_releases_request(tmp_path) -> 
     finally:
         release.set()
         controller.close()
+
+
+def test_explicit_cpu_mode_skips_cuda_preflight_and_gpu_monitor(tmp_path) -> None:
+    process = SimulatedWorkerProcess()
+    popen_calls = []
+
+    def popen(*args, **kwargs):
+        popen_calls.append((args, kwargs))
+        return process
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("CPU mode must not call GPU safety probes")
+
+    controller = QwenController(
+        config(tmp_path, allow_cpu_fallback=True),
+        popen=popen,
+        preflight_runner=forbidden,
+        metric_sampler=forbidden,
+        kernel_sampler=forbidden,
+    )
+    controller.start()
+    try:
+        result = controller.submit(
+            {
+                "text": "cpu",
+                "execution_mode": "cpu",
+                "confirm_cpu_fallback": True,
+            }
+        )
+        assert result["execution_mode"] == "cpu"
+        environment = popen_calls[0][1]["env"]
+        assert environment["QWEN_TTS_DEVICE"] == "cpu"
+        assert environment["QWEN_TTS_DTYPE"] == "float32"
+        assert environment["QWEN_CPU_EMERGENCY_CONFIRMED"] == "1"
+    finally:
+        controller.close()
+
+
+def test_cpu_mode_never_activates_without_both_policy_and_confirmation(tmp_path) -> None:
+    controller = QwenController(
+        config(tmp_path, allow_cpu_fallback=True),
+        popen=lambda *_args, **_kwargs: pytest.fail("worker must not start"),
+        preflight_runner=safe_preflight,
+        metric_sampler=safe_metrics,
+        kernel_sampler=no_kernel_events,
+    )
+    controller.start()
+    try:
+        with pytest.raises(QwenServiceError) as error:
+            controller.submit({"execution_mode": "cpu", "text": "no confirmation"})
+        assert error.value.code == "cpu_fallback_not_confirmed"
+    finally:
+        controller.close()

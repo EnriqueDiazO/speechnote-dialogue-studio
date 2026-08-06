@@ -254,6 +254,7 @@ def _init_state() -> tuple[AppPaths, ProjectStore]:
         st.session_state.qwen_gallery_options = dict(DEFAULT_GENERATION_OPTIONS)
         st.session_state.speechnote_voice_catalog = {}
         st.session_state.qwen_session_confirmed = False
+        st.session_state.qwen_cpu_emergency_confirmed = False
     # ``busy`` existed in v0.1 and could survive an interrupted Streamlit run forever.
     # It is not evidence of a real process-local synthesis and is safe to migrate away.
     st.session_state.pop("busy", None)
@@ -268,6 +269,8 @@ def _init_state() -> tuple[AppPaths, ProjectStore]:
         st.session_state.speechnote_voice_catalog = {}
     if "qwen_session_confirmed" not in st.session_state:
         st.session_state.qwen_session_confirmed = False
+    if "qwen_cpu_emergency_confirmed" not in st.session_state:
+        st.session_state.qwen_cpu_emergency_confirmed = False
     if "global_pronunciation_rules" not in st.session_state:
         loaded_dictionary = GlobalPronunciationStore(paths).load()
         st.session_state.global_pronunciation_rules = list(loaded_dictionary.rules)
@@ -376,10 +379,18 @@ def _project_capabilities(
     preflight_allowed = preflight is None or preflight.get("allowed") is True
     confirmation_required = preflight is not None and preflight_allowed
     confirmed = bool(st.session_state.get("qwen_session_confirmed"))
+    raw_policy = qwen_status.get("policy", {}) if isinstance(qwen_status, dict) else {}
+    cpu_allowed = bool(
+        isinstance(raw_policy, dict)
+        and raw_policy.get("allow_cpu_fallback") is True
+        and st.session_state.get("qwen_cpu_emergency_confirmed")
+    )
     qwen_available = (
         qwen_state == "idle"
-        and preflight_allowed
-        and (confirmed or not confirmation_required)
+        and (
+            cpu_allowed
+            or (preflight_allowed and (confirmed or not confirmation_required))
+        )
     )
     playable = [
         _valid_ready_audio(project_dir, utterance) is not None for utterance in project.utterances
@@ -614,6 +625,7 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
         "offline": "Apagado",
         "starting": "Iniciando",
         "starting_worker": "Iniciando worker",
+        "cpu_emergency": "CPU de emergencia",
         "idle": "Disponible",
         "blocked": "Bloqueado",
         "gpu_fault": "Fallo GPU",
@@ -701,6 +713,28 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
         if status.get("last_error"):
             st.error(str(status["last_error"]))
         manager = QwenBackendManager(paths)
+        active_policy = status.get("policy")
+        if not isinstance(active_policy, dict):
+            try:
+                active_policy = manager.gpu_policy().to_dict()
+            except ValueError:
+                active_policy = GpuSafetyPolicy().to_dict()
+        cpu_policy_enabled = active_policy.get("allow_cpu_fallback") is True
+        if cpu_policy_enabled:
+            st.warning("Modo CPU de emergencia: muy lento. Sólo para diagnóstico o frases cortas.")
+            cpu_confirmation = st.checkbox(
+                "Activar explícitamente CPU de emergencia para esta sesión",
+                value=bool(st.session_state.get("qwen_cpu_emergency_confirmed")),
+                key="qwen-cpu-emergency-confirmation",
+                help="Nunca se activa automáticamente después de un fallo GPU.",
+            )
+            if cpu_confirmation != bool(
+                st.session_state.get("qwen_cpu_emergency_confirmed")
+            ):
+                st.session_state.qwen_cpu_emergency_confirmed = cpu_confirmation
+                if cpu_confirmation:
+                    st.session_state.qwen_session_confirmed = False
+                st.rerun()
         controls = st.columns(5)
         if controls[0].button(
             "Ejecutar preflight",
@@ -711,6 +745,23 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
                     manager.preflight()
                 else:
                     manager.client.preflight()
+                _clear_diagnostics_cache()
+                st.rerun()
+            except (OSError, ValueError, QwenClientError) as exc:
+                st.error(str(exc))
+        if cpu_policy_enabled and st.button(
+            "Iniciar CPU de emergencia",
+            disabled=(
+                state != "offline"
+                or not st.session_state.get("qwen_cpu_emergency_confirmed")
+            ),
+            use_container_width=True,
+        ):
+            try:
+                manager.start(
+                    execution_mode="cpu",
+                    confirm_cpu_fallback=True,
+                )
                 _clear_diagnostics_cache()
                 st.rerun()
             except (OSError, ValueError, QwenClientError) as exc:
@@ -812,12 +863,6 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
         elif st.session_state.get("qwen_session_confirmed"):
             st.success("Preflight confirmado para esta sesión segura.")
 
-        active_policy = status.get("policy")
-        if not isinstance(active_policy, dict):
-            try:
-                active_policy = manager.gpu_policy().to_dict()
-            except ValueError:
-                active_policy = GpuSafetyPolicy().to_dict()
         with st.expander("Política GPU activa y editable"):
             policy_text = st.text_area(
                 "JSON de política local",
@@ -835,6 +880,7 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
                     paths.ensure()
                     atomic_write_text(paths.qwen_gpu_policy, policy_json(policy))
                     st.session_state.qwen_session_confirmed = False
+                    st.session_state.qwen_cpu_emergency_confirmed = False
                     _clear_diagnostics_cache()
                     st.success("Política GPU guardada; vuelve a ejecutar el preflight.")
                 except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -1483,6 +1529,14 @@ def _render_qwen_gallery(
                     session_token=st.session_state.session_token,
                     coordinator=GLOBAL_SYNTHESIS_COORDINATOR,
                     client=QwenClient(),
+                    execution_mode=(
+                        "cpu"
+                        if st.session_state.get("qwen_cpu_emergency_confirmed")
+                        else "cuda"
+                    ),
+                    confirm_cpu_fallback=bool(
+                        st.session_state.get("qwen_cpu_emergency_confirmed")
+                    ),
                 )
             st.session_state.qwen_gallery_records = records
             _clear_diagnostics_cache()
@@ -1607,6 +1661,14 @@ def _run_generation(
                                 f"utterance-pronunciation-fallback-{current_id}",
                                 False,
                             )
+                        ),
+                        qwen_execution_mode=(
+                            "cpu"
+                            if st.session_state.get("qwen_cpu_emergency_confirmed")
+                            else "cuda"
+                        ),
+                        confirm_cpu_fallback=bool(
+                            st.session_state.get("qwen_cpu_emergency_confirmed")
                         ),
                     ),
                 )

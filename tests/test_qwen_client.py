@@ -14,7 +14,7 @@ from dialogue_studio.qwen_client import (
     QwenClientConfig,
     QwenClientError,
 )
-from dialogue_studio.qwen_gpu_safety import GpuPreflightResult
+from dialogue_studio.qwen_gpu_safety import GpuPreflightResult, GpuSafetyPolicy
 
 
 def config(tmp_path: Path) -> QwenClientConfig:
@@ -67,6 +67,8 @@ def test_client_uses_local_json_endpoints_and_omits_empty_instruct(
     payload = json.loads(requests[1][0].data)
     assert payload["speaker"] == "serena"
     assert "instruct" not in payload
+    assert payload["execution_mode"] == "cuda"
+    assert payload["confirm_cpu_fallback"] is False
     assert requests[1][1] == 10
 
 
@@ -129,3 +131,33 @@ def test_backend_start_removes_temporary_start_lock(monkeypatch, tmp_path: Path)
     result = manager.start(wait_seconds=1)
     assert result["state"] == "idle"
     assert not (manager.runtime_dir / "qwen-start.lock").exists()
+
+
+def test_backend_cpu_start_requires_confirmation_and_skips_gpu_preflight(
+    monkeypatch, tmp_path: Path
+) -> None:
+    settings = config(tmp_path)
+    settings.python.write_text("fake", encoding="utf-8")
+    calls = []
+    manager = QwenBackendManager(
+        AppPaths(tmp_path / "Music"),
+        settings,
+        popen=lambda *args, **kwargs: calls.append((args, kwargs)) or object(),
+        policy=GpuSafetyPolicy(allow_cpu_fallback=True),
+    )
+    monkeypatch.setattr(
+        manager,
+        "preflight",
+        lambda: pytest.fail("CPU start must not run the GPU preflight"),
+    )
+    monkeypatch.setattr(
+        manager,
+        "status",
+        lambda: {"state": "offline"} if len(calls) == 0 else {"state": "idle"},
+    )
+    with pytest.raises(QwenClientError) as error:
+        manager.start(execution_mode="cpu", confirm_cpu_fallback=False)
+    assert error.value.code == "cpu_fallback_not_confirmed"
+    result = manager.start(execution_mode="cpu", confirm_cpu_fallback=True)
+    assert result["state"] == "idle"
+    assert len(calls) == 1

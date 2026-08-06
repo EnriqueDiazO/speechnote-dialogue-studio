@@ -99,6 +99,8 @@ def generate_qwen_previews(
     session_token: str,
     coordinator: SynthesisCoordinator,
     client: QwenClient,
+    execution_mode: str = "cuda",
+    confirm_cpu_fallback: bool = False,
 ) -> list[QwenPreview]:
     if not text.strip():
         raise ValueError("Escribe un texto para comparar voces")
@@ -137,6 +139,8 @@ def generate_qwen_previews(
                     language=language,
                     generation_options=generation_options,
                     output_path=current_path,
+                    execution_mode=execution_mode,
+                    confirm_cpu_fallback=confirm_cpu_fallback,
                 ),
             )
             if not isinstance(response, dict):

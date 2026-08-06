@@ -142,6 +142,8 @@ class QwenClient:
         generation_options: dict[str, int | float],
         output_path: Path,
         instruct: str | None = None,
+        execution_mode: str = "cuda",
+        confirm_cpu_fallback: bool = False,
     ) -> dict[str, Any]:
         payload: dict[str, object] = {
             "text": text,
@@ -149,6 +151,8 @@ class QwenClient:
             "language": language,
             "generation_options": generation_options,
             "output_path": str(output_path),
+            "execution_mode": execution_mode,
+            "confirm_cpu_fallback": confirm_cpu_fallback,
         }
         if instruct:
             payload["instruct"] = instruct
@@ -177,6 +181,8 @@ def synthesize_qwen_text(
     output_path: Path,
     *,
     client: QwenClient | None = None,
+    execution_mode: str = "cuda",
+    confirm_cpu_fallback: bool = False,
 ) -> dict[str, Any]:
     """Generate and validate one native 24 kHz Qwen WAV without importing Qwen."""
     active_client = client or QwenClient()
@@ -187,6 +193,8 @@ def synthesize_qwen_text(
             language=language,
             generation_options=generation_options,
             output_path=output_path,
+            execution_mode=execution_mode,
+            confirm_cpu_fallback=confirm_cpu_fallback,
         )
     except QwenClientError as exc:
         if exc.code == "gpu_busy":
@@ -291,19 +299,34 @@ class QwenBackendManager:
     def preflight(self) -> GpuPreflightResult:
         return run_gpu_preflight(self.gpu_policy(), self.config.python, service_state="offline")
 
-    def start(self, *, wait_seconds: float = 30) -> dict[str, Any]:
+    def start(
+        self,
+        *,
+        wait_seconds: float = 30,
+        execution_mode: str = "cuda",
+        confirm_cpu_fallback: bool = False,
+    ) -> dict[str, Any]:
         current = self.status()
         if current.get("state") != "offline":
             return current
         if not self.config.python.is_file():
             raise QwenClientError(f"No existe el Python Qwen: {self.config.python}")
-        preflight = self.preflight()
-        if not preflight.allowed:
-            detail = preflight.blockers[0] if preflight.blockers else "estado GPU no seguro"
-            raise QwenClientError(
-                "Generación bloqueada para proteger la sesión gráfica. " + detail,
-                code="gpu_preflight_blocked",
-            )
+        if execution_mode == "cpu":
+            if not (self.gpu_policy().allow_cpu_fallback and confirm_cpu_fallback):
+                raise QwenClientError(
+                    "El modo CPU requiere habilitación y confirmación explícitas",
+                    code="cpu_fallback_not_confirmed",
+                )
+        elif execution_mode == "cuda":
+            preflight = self.preflight()
+            if not preflight.allowed:
+                detail = preflight.blockers[0] if preflight.blockers else "estado GPU no seguro"
+                raise QwenClientError(
+                    "Generación bloqueada para proteger la sesión gráfica. " + detail,
+                    code="gpu_preflight_blocked",
+                )
+        else:
+            raise QwenClientError("Modo de ejecución Qwen desconocido", code="invalid_mode")
         self.runtime_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         lock_path = self.runtime_dir / "qwen-start.lock"
         with lock_path.open("a+b") as lock:

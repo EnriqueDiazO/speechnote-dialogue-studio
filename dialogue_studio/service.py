@@ -421,6 +421,8 @@ def generate_utterance(
     global_rules: list[PronunciationRule] | tuple[PronunciationRule, ...] = (),
     pronunciation_engine: PronunciationEngine | None = None,
     allow_pronunciation_fallback: bool = False,
+    qwen_execution_mode: str = "cuda",
+    confirm_cpu_fallback: bool = False,
 ) -> Utterance:
     utterance = next(item for item in project.utterances if item.utterance_id == utterance_id)
     speaker = project.speaker(utterance.speaker_id)
@@ -480,13 +482,21 @@ def generate_utterance(
                 **DEFAULT_GENERATION_OPTIONS,
                 **tts.generation_options,
             }
-            qwen_synthesizer(
+            qwen_arguments = (
                 tts.voice_id,
                 effective_text,
                 tts.language,
                 generation_options,
                 paths.raw,
             )
+            if qwen_execution_mode == "cpu":
+                qwen_synthesizer(
+                    *qwen_arguments,
+                    execution_mode="cpu",
+                    confirm_cpu_fallback=confirm_cpu_fallback,
+                )
+            else:
+                qwen_synthesizer(*qwen_arguments)
         else:
             synthesizer(
                 tts.voice_id,

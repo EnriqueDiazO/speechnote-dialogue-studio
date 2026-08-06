@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import threading
 import wave
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from dialogue_studio.qwen_gpu_safety import GpuSafetyPolicy
 from dialogue_studio.qwen_service import (
     FALLBACK_LANGUAGES,
     FALLBACK_SPEAKERS,
@@ -64,6 +67,7 @@ class FakeTorch:
     __version__ = "2.7.1"
     version = SimpleNamespace(cuda="11.8")
     bfloat16 = object()
+    float32 = object()
 
     def __init__(self) -> None:
         self.cuda = FakeCuda()
@@ -342,3 +346,50 @@ def test_non_finite_samples_never_create_a_final_wav(tmp_path: Path) -> None:
             }
         )
     assert not final.exists()
+
+
+def test_cpu_config_requires_policy_and_explicit_confirmation(tmp_path: Path) -> None:
+    policy = GpuSafetyPolicy(allow_cpu_fallback=True)
+    environment = {
+        "QWEN_TTS_DEVICE": "cpu",
+        "QWEN_TTS_DTYPE": "float32",
+        "QWEN_TTS_ATTN": "sdpa",
+        "QWEN_TTS_OUTPUT_ROOT": str(tmp_path),
+        "QWEN_TTS_RUNTIME_DIR": str(tmp_path / "runtime"),
+        "QWEN_GPU_SAFETY_POLICY": json.dumps(policy.to_dict()),
+        "QWEN_CPU_EMERGENCY_CONFIRMED": "1",
+    }
+    assert QwenServiceConfig.from_env(environment).device == "cpu"
+    environment["QWEN_CPU_EMERGENCY_CONFIRMED"] = "0"
+    with pytest.raises(ValueError, match="expresamente autorizado"):
+        QwenServiceConfig.from_env(environment)
+
+
+def test_cpu_runtime_never_calls_cuda_and_still_writes_atomic_audio(tmp_path: Path) -> None:
+    class NoCuda:
+        def __getattribute__(self, name):
+            raise AssertionError(f"CPU mode touched CUDA: {name}")
+
+    fake_torch = FakeTorch()
+    fake_torch.cuda = NoCuda()
+    cpu_config = replace(config(tmp_path), device="cpu", dtype="float32")
+    runtime = QwenRuntime(
+        cpu_config,
+        torch_loader=lambda: fake_torch,
+        model_loader=lambda _config, _torch: FakeModel(),
+        wave_writer=write_wave,
+        finite_checker=lambda _waveform: True,
+    )
+    runtime.initialize()
+    output = tmp_path / "cpu" / "safe.wav"
+    result = runtime.synthesize(
+        {
+            "text": "Prueba CPU",
+            "speaker": "serena",
+            "language": "spanish",
+            "output_path": str(output),
+        }
+    )
+    assert result["ok"] is True
+    assert output.read_bytes()[:4] == b"RIFF"
+    runtime.unload()

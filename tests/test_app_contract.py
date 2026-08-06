@@ -8,6 +8,7 @@ from streamlit.testing.v1 import AppTest
 import dialogue_studio.ui as ui
 from dialogue_studio.audio import AudioInfo
 from dialogue_studio.paths import AppPaths
+from dialogue_studio.qwen_gpu_safety import GpuSafetyPolicy
 from dialogue_studio.qwen_preview import QwenPreview
 from dialogue_studio.recovery import LEGACY_BUSY_MESSAGE
 from dialogue_studio.speechnote import TTSModel
@@ -811,6 +812,35 @@ def test_safe_qwen_requires_one_session_confirmation(monkeypatch, tmp_path: Path
     _keyed(app.checkbox, "qwen-risk-confirmation").check().run()
     assert app.session_state.qwen_session_confirmed is True
     assert not _keyed(app.button, f"generate-{utterance.utterance_id}").disabled
+
+
+def test_cpu_emergency_is_explicit_and_can_bypass_only_gpu_preflight(
+    monkeypatch, tmp_path: Path
+) -> None:
+    paths = AppPaths(tmp_path / "Music")
+    diagnostics = _diagnostics(tts_available=False, qwen_available=True)
+    diagnostics["qwen"]["policy"] = {
+        **GpuSafetyPolicy().to_dict(),
+        "allow_cpu_fallback": True,
+    }
+    diagnostics["qwen_preflight"] = {
+        "allowed": False,
+        "blockers": ["GPU compartida no segura"],
+        "warnings": [],
+        "recommended_actions": [],
+    }
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: diagnostics)
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    utterance = app.session_state.project.utterances[0]
+    speaker = app.session_state.project.speakers[0]
+    _keyed(app.selectbox, f"speaker-provider-{speaker.speaker_id}").select("qwen").run()
+    _keyed(app.text_area, f"utterance-text-{utterance.utterance_id}").set_value("CPU").run()
+    assert _keyed(app.button, f"generate-{utterance.utterance_id}").disabled
+    _keyed(app.checkbox, "qwen-cpu-emergency-confirmation").check().run()
+    assert app.session_state.qwen_cpu_emergency_confirmed is True
+    assert not _keyed(app.button, f"generate-{utterance.utterance_id}").disabled
+    assert any("muy lento" in item.value.lower() for item in app.warning)
 
 
 def test_rendering_inherited_qwen_override_does_not_mark_ready_audio_stale(

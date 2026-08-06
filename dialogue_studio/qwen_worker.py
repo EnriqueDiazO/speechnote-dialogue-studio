@@ -68,7 +68,9 @@ class QwenRuntime:
         return Qwen3TTSModel.from_pretrained(
             config.model,
             device_map=config.device,
-            dtype=torch_module.bfloat16,
+            dtype=(
+                torch_module.bfloat16 if config.device == "cuda:0" else torch_module.float32
+            ),
             attn_implementation=config.attention,
         )
 
@@ -87,9 +89,9 @@ class QwenRuntime:
     def initialize(self) -> None:
         try:
             torch_module = self._get_torch()
-            if not torch_module.cuda.is_available():
+            if self.config.device == "cuda:0" and not torch_module.cuda.is_available():
                 raise RuntimeError("CUDA no está disponible")
-            if not torch_module.cuda.is_bf16_supported():
+            if self.config.device == "cuda:0" and not torch_module.cuda.is_bf16_supported():
                 raise RuntimeError("La GPU no soporta bfloat16")
         except Exception as exc:
             self._set_state("error", str(exc))
@@ -132,7 +134,7 @@ class QwenRuntime:
     def _gpu_details(self) -> dict[str, object]:
         torch_module = self._get_torch()
         cuda = torch_module.cuda
-        available = bool(cuda.is_available())
+        available = bool(self.config.device == "cuda:0" and cuda.is_available())
         free: int | None = None
         total: int | None = None
         if available:
@@ -219,7 +221,7 @@ class QwenRuntime:
             self._set_state("generating")
             torch_module = self._get_torch()
             seed = int(options.pop("seed"))
-            devices = [0] if torch_module.cuda.is_available() else []
+            devices = [0] if self.config.device == "cuda:0" else []
             with (
                 torch_module.inference_mode(),
                 torch_module.random.fork_rng(devices=devices, enabled=True),
@@ -290,7 +292,7 @@ class QwenRuntime:
             was_loaded = self._model is not None
             self._model = None
             gc.collect()
-            if self._torch is not None:
+            if self._torch is not None and self.config.device == "cuda:0":
                 self._torch.cuda.empty_cache()
                 ipc_collect = getattr(self._torch.cuda, "ipc_collect", None)
                 if callable(ipc_collect):

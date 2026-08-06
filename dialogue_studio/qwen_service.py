@@ -114,8 +114,7 @@ class QwenServiceConfig:
         device = values.get("QWEN_TTS_DEVICE", "cuda:0")
         dtype = values.get("QWEN_TTS_DTYPE", "bfloat16")
         attention = values.get("QWEN_TTS_ATTN", "sdpa")
-        if device != "cuda:0" or dtype != "bfloat16" or attention != "sdpa":
-            raise ValueError("Esta integración requiere cuda:0, bfloat16 y sdpa")
+        cuda_mode = device == "cuda:0" and dtype == "bfloat16"
         output_root = Path(
             values.get(
                 "QWEN_TTS_OUTPUT_ROOT",
@@ -135,6 +134,16 @@ class QwenServiceConfig:
             if not isinstance(decoded, dict):
                 raise ValueError("QWEN_GPU_SAFETY_POLICY debe ser un objeto JSON")
             policy = GpuSafetyPolicy.from_mapping(decoded)
+        cpu_mode = (
+            device == "cpu"
+            and dtype == "float32"
+            and values.get("QWEN_CPU_EMERGENCY_CONFIRMED") == "1"
+            and policy.allow_cpu_fallback
+        )
+        if attention != "sdpa" or not (cuda_mode or cpu_mode):
+            raise ValueError(
+                "Qwen requiere cuda:0/bfloat16 o CPU float32 expresamente autorizado, con sdpa"
+            )
         return cls(
             model=values.get("QWEN_TTS_MODEL", DEFAULT_MODEL),
             host="127.0.0.1",
@@ -260,6 +269,7 @@ class QwenController:
         self._last_timeout: dict[str, object] | None = None
         self._errors: list[dict[str, object]] = []
         self._model_loaded = False
+        self._worker_mode: str | None = None
         self._load_count = 0
         self._capabilities = self._fallback_capabilities()
         self._closing = threading.Event()
@@ -364,6 +374,7 @@ class QwenController:
                 "worker_pid": worker_pid,
                 "worker_alive": worker_pid is not None,
                 "worker_creation_method": self.creation_method,
+                "worker_mode": self._worker_mode,
                 "worker_exit_code": self._last_worker_exit_code,
                 "queue": queue_items,
                 "current_stage": self._current_job.stage if self._current_job else None,
@@ -439,6 +450,7 @@ class QwenController:
                 "pid": self._worker_pid(),
                 "alive": self._worker_pid() is not None,
                 "creation_method": self.creation_method,
+                "mode": self._worker_mode,
                 "model_loaded": self._model_loaded,
                 "load_count": self._load_count,
                 "exit_code": self._last_worker_exit_code,
@@ -469,11 +481,34 @@ class QwenController:
             self._log("worker_output", line=line.rstrip()[:1000])
         messages.put({"event": "process_exit", "exit_code": process.poll()})
 
-    def _start_worker(self) -> None:
-        if self._worker_pid() is not None:
+    def _start_worker(self, mode: str = "cuda") -> None:
+        if mode not in {"cuda", "cpu"}:
+            raise QwenServiceError("invalid_mode", "Modo de ejecución Qwen desconocido")
+        if self._worker_pid() is not None and self._worker_mode == mode:
             return
+        if self._worker_pid() is not None:
+            self._terminate_worker("execution_mode_change")
         self._state = "starting_worker"
         environment = os.environ.copy()
+        if mode == "cpu":
+            environment.update(
+                {
+                    "QWEN_TTS_DEVICE": "cpu",
+                    "QWEN_TTS_DTYPE": "float32",
+                    "QWEN_CPU_EMERGENCY_CONFIRMED": "1",
+                    "QWEN_GPU_SAFETY_POLICY": json.dumps(
+                        self.policy.to_dict(), separators=(",", ":")
+                    ),
+                }
+            )
+        else:
+            environment.update(
+                {
+                    "QWEN_TTS_DEVICE": "cuda:0",
+                    "QWEN_TTS_DTYPE": "bfloat16",
+                    "QWEN_CPU_EMERGENCY_CONFIRMED": "0",
+                }
+            )
         self.config.worker_log_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with self.config.worker_log_file.open("ab", buffering=0) as error_log:
             process = self._popen(
@@ -496,6 +531,7 @@ class QwenController:
             daemon=True,
         )
         self._worker = WorkerHandle(process, messages, reader)
+        self._worker_mode = mode
         reader.start()
         deadline = time.monotonic() + self.policy.worker_start_timeout_seconds
         while time.monotonic() < deadline:
@@ -563,7 +599,7 @@ class QwenController:
             self._state = state
         return state
 
-    def _run_synthesis(self, job: QwenJob) -> dict[str, object]:
+    def _run_synthesis(self, job: QwenJob, *, mode: str = "cuda") -> dict[str, object]:
         worker = self._worker
         if worker is None:
             raise QwenServiceError("worker_dead", "No existe worker Qwen")
@@ -620,7 +656,7 @@ class QwenController:
                     ) from None
                 message = {}
             now = time.monotonic()
-            if now >= next_metric_poll:
+            if mode == "cuda" and now >= next_metric_poll:
                 poll_kernel = now >= next_kernel_poll
                 blocker = self._monitor_worker(job.stage, poll_kernel=poll_kernel)
                 next_metric_poll = now + self.policy.monitor_interval_seconds
@@ -752,6 +788,7 @@ class QwenController:
         if self._worker is worker:
             self._worker = None
         self._model_loaded = False
+        self._worker_mode = None
 
     def _command_worker(self, action: str, *, timeout: float = 30) -> dict[str, object]:
         worker = self._worker
@@ -796,6 +833,7 @@ class QwenController:
         worker = self._worker
         if worker is None:
             self._model_loaded = False
+            self._worker_mode = None
             return {"ok": True, "stopped": False, "reason": reason}
         process = worker.process
         if process.poll() is None:
@@ -808,6 +846,7 @@ class QwenController:
         self._last_worker_exit_code = process.poll()
         self._worker = None
         self._model_loaded = False
+        self._worker_mode = None
         self._log(
             "worker_stopped",
             reason=reason,
@@ -890,7 +929,18 @@ class QwenController:
             with self._lock:
                 self._current_job = job
             try:
-                if self._gpu_fault_reason:
+                mode = str(job.payload.get("execution_mode") or "cuda")
+                cpu_confirmed = job.payload.get("confirm_cpu_fallback") is True
+                if mode not in {"cuda", "cpu"}:
+                    raise QwenServiceError("invalid_mode", "Modo de ejecución Qwen desconocido")
+                if mode == "cpu" and not (
+                    self.policy.allow_cpu_fallback and cpu_confirmed
+                ):
+                    raise QwenServiceError(
+                        "cpu_fallback_not_confirmed",
+                        "El modo CPU requiere habilitación en la política y confirmación explícita",
+                    )
+                if mode == "cuda" and self._gpu_fault_reason:
                     raise QwenServiceError(
                         "gpu_fault",
                         "Qwen permanece bloqueado después de un fallo GPU: "
@@ -898,18 +948,26 @@ class QwenController:
                         status=HTTPStatus.SERVICE_UNAVAILABLE,
                     )
                 job.stage = "preflight"
-                preflight = self.preflight(queued_job=True)
-                if not preflight.allowed:
-                    detail = preflight.blockers[0] if preflight.blockers else "estado no seguro"
-                    raise QwenServiceError(
-                        "gpu_preflight_blocked",
-                        "Generación bloqueada para proteger la sesión gráfica. " + detail,
-                        status=HTTPStatus.SERVICE_UNAVAILABLE,
-                    )
+                if mode == "cuda":
+                    preflight = self.preflight(queued_job=True)
+                    if not preflight.allowed:
+                        detail = (
+                            preflight.blockers[0]
+                            if preflight.blockers
+                            else "estado no seguro"
+                        )
+                        raise QwenServiceError(
+                            "gpu_preflight_blocked",
+                            "Generación bloqueada para proteger la sesión gráfica. " + detail,
+                            status=HTTPStatus.SERVICE_UNAVAILABLE,
+                        )
+                else:
+                    self._state = "cpu_emergency"
                 job.stage = "starting_worker"
-                self._start_worker()
+                self._start_worker(mode)
                 with self._worker_io_lock:
-                    job.result = self._run_synthesis(job)
+                    job.result = self._run_synthesis(job, mode=mode)
+                    job.result["execution_mode"] = mode
                 job.stage = "finalized"
                 if self.policy.post_job_cooldown_seconds:
                     time.sleep(self.policy.post_job_cooldown_seconds)
