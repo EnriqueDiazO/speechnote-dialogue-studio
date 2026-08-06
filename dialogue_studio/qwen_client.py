@@ -127,6 +127,9 @@ class QwenClient:
     def capabilities(self) -> dict[str, Any]:
         return self._request("GET", "/capabilities")
 
+    def preflight(self) -> dict[str, Any]:
+        return self._request("GET", "/preflight", timeout=30)
+
     def synthesize(
         self,
         *,
@@ -155,6 +158,12 @@ class QwenClient:
 
     def shutdown(self) -> dict[str, Any]:
         return self._request("POST", "/shutdown", {})
+
+    def stop_worker(self) -> dict[str, Any]:
+        return self._request("POST", "/worker/stop", {})
+
+    def cancel(self, *, stop_current: bool = True) -> dict[str, Any]:
+        return self._request("POST", "/cancel", {"stop_current": stop_current})
 
 
 def synthesize_qwen_text(
@@ -312,6 +321,9 @@ class QwenBackendManager:
                     "QWEN_TTS_TIMEOUT": str(self.config.timeout),
                     "QWEN_TTS_OUTPUT_ROOT": str(self.paths.root),
                     "QWEN_TTS_RUNTIME_DIR": str(self.runtime_dir),
+                    "QWEN_GPU_SAFETY_POLICY": json.dumps(
+                        self.gpu_policy().to_dict(), separators=(",", ":")
+                    ),
                 }
             )
             repository = Path(__file__).resolve().parents[1]

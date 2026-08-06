@@ -11,11 +11,11 @@ import pytest
 from dialogue_studio.qwen_service import (
     FALLBACK_LANGUAGES,
     FALLBACK_SPEAKERS,
-    QwenRuntime,
     QwenServiceConfig,
     QwenServiceError,
     validate_generation_options,
 )
+from dialogue_studio.qwen_worker import QwenRuntime
 
 
 class FakeCuda:
@@ -72,6 +72,11 @@ class FakeTorch:
 
     def manual_seed(self, seed: int) -> None:
         self.seeds.append(seed)
+
+    @staticmethod
+    @contextlib.contextmanager
+    def inference_mode():
+        yield
 
 
 class FakeModel:
@@ -273,7 +278,7 @@ def test_unload_refuses_while_generating_and_releases_vram(tmp_path: Path) -> No
         finite_checker=lambda _waveform: True,
     )
     runtime.initialize()
-    runtime._ensure_model()
+    runtime.ensure_model()
     assert runtime._generation_lock.acquire(blocking=False)
     try:
         with pytest.raises(QwenServiceError) as busy:
@@ -281,7 +286,9 @@ def test_unload_refuses_while_generating_and_releases_vram(tmp_path: Path) -> No
         assert busy.value.code == "gpu_busy"
     finally:
         runtime._generation_lock.release()
-    assert runtime.unload() == {"ok": True, "unloaded": True}
+    result = runtime.unload()
+    assert result["ok"] is True
+    assert result["unloaded"] is True
     assert fake_torch.cuda.emptied == 1
 
 
@@ -313,3 +320,25 @@ def test_threaded_busy_request_does_not_wait(tmp_path: Path) -> None:
     finally:
         release.set()
         thread.join(timeout=1)
+
+
+def test_non_finite_samples_never_create_a_final_wav(tmp_path: Path) -> None:
+    runtime = QwenRuntime(
+        config(tmp_path),
+        torch_loader=FakeTorch,
+        model_loader=lambda _config, _torch: FakeModel(),
+        wave_writer=write_wave,
+        finite_checker=lambda _waveform: False,
+    )
+    runtime.initialize()
+    final = tmp_path / "audio" / "nan.wav"
+    with pytest.raises(QwenServiceError, match="NaN"):
+        runtime.synthesize(
+            {
+                "text": "Hola",
+                "speaker": "serena",
+                "language": "spanish",
+                "output_path": str(final),
+            }
+        )
+    assert not final.exists()

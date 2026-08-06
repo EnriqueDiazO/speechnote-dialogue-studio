@@ -1,25 +1,30 @@
-"""Isolated localhost service for Qwen3-TTS.
+"""Local Qwen controller that never imports Torch or ``qwen_tts``.
 
-Torch and qwen_tts are imported lazily inside the dedicated Qwen process, never by the
-main Streamlit application.
+The HTTP controller owns policy, queue and lifecycle. CUDA exists only in the child
+``dialogue_studio.qwen_worker`` process created with subprocess spawn semantics.
 """
 
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
+import queue
 import signal
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from .qwen_gpu_safety import GpuPreflightResult, GpuSafetyPolicy
+from .qwen_preflight import run_gpu_preflight
 
 DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 FALLBACK_SPEAKERS = (
@@ -65,7 +70,7 @@ DEFAULT_GENERATION_OPTIONS: dict[str, int | float] = {
 
 
 class QwenServiceError(RuntimeError):
-    """Structured service error safe to return to a localhost client."""
+    """Structured controller error safe to return to a localhost client."""
 
     def __init__(
         self,
@@ -92,6 +97,7 @@ class QwenServiceConfig:
     timeout: float
     output_root: Path
     pid_file: Path
+    policy: GpuSafetyPolicy = field(default_factory=GpuSafetyPolicy)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> QwenServiceConfig:
@@ -119,6 +125,13 @@ class QwenServiceConfig:
                 str(Path.home() / ".cache" / "speechnote-dialogue-studio"),
             )
         ).expanduser()
+        policy_payload = values.get("QWEN_GPU_SAFETY_POLICY")
+        policy = GpuSafetyPolicy()
+        if policy_payload:
+            decoded = json.loads(policy_payload)
+            if not isinstance(decoded, dict):
+                raise ValueError("QWEN_GPU_SAFETY_POLICY debe ser un objeto JSON")
+            policy = GpuSafetyPolicy.from_mapping(decoded)
         return cls(
             model=values.get("QWEN_TTS_MODEL", DEFAULT_MODEL),
             host="127.0.0.1",
@@ -129,7 +142,16 @@ class QwenServiceConfig:
             timeout=float(values.get("QWEN_TTS_TIMEOUT", "600")),
             output_root=output_root,
             pid_file=runtime_dir / f"qwen-tts-{port}.pid",
+            policy=policy,
         )
+
+    @property
+    def worker_log_file(self) -> Path:
+        return self.pid_file.parent / "qwen-worker.log"
+
+    @property
+    def controller_log_file(self) -> Path:
+        return self.pid_file.parent / "qwen-controller.jsonl"
 
 
 def validate_generation_options(value: object) -> dict[str, int | float]:
@@ -178,151 +200,87 @@ def _safe_output_path(root: Path, raw_path: object) -> Path:
     return candidate_resolved
 
 
-class QwenRuntime:
-    """Owns one lazy model instance and serializes GPU generation."""
+@dataclass
+class QwenJob:
+    request_id: str
+    payload: dict[str, object]
+    stage: str = "pending"
+    result: dict[str, object] | None = None
+    error: QwenServiceError | None = None
+    canceled: bool = False
+    done: threading.Event = field(default_factory=threading.Event)
+
+
+@dataclass
+class WorkerHandle:
+    process: Any
+    messages: queue.Queue[dict[str, Any]]
+    reader: threading.Thread
+
+
+class QwenController:
+    """Serialize jobs and own exactly one disposable CUDA worker."""
+
+    creation_method = "subprocess_spawn"
 
     def __init__(
         self,
         config: QwenServiceConfig,
         *,
-        model_loader: Callable[[QwenServiceConfig, Any], Any] | None = None,
-        torch_loader: Callable[[], Any] | None = None,
-        wave_writer: Callable[..., None] | None = None,
-        finite_checker: Callable[[Any], bool] | None = None,
+        popen: Callable[..., Any] = subprocess.Popen,
+        preflight_runner: Callable[..., GpuPreflightResult] = run_gpu_preflight,
     ) -> None:
         self.config = config
-        self._model_loader = model_loader or self._default_model_loader
-        self._torch_loader = torch_loader or self._default_torch_loader
-        self._wave_writer = wave_writer or self._default_wave_writer
-        self._finite_checker = finite_checker or self._default_finite_checker
-        self._state_lock = threading.RLock()
-        self._generation_lock = threading.Lock()
-        self._model: Any | None = None
-        self._torch: Any | None = None
+        self.policy = config.policy
+        self._popen = popen
+        self._preflight_runner = preflight_runner
+        self._lock = threading.RLock()
+        self._worker_io_lock = threading.Lock()
+        self._jobs: queue.Queue[QwenJob | None] = queue.Queue()
+        self._known_jobs: dict[str, QwenJob] = {}
+        self._worker: WorkerHandle | None = None
+        self._current_job: QwenJob | None = None
         self._state = "starting"
         self._last_error: str | None = None
-        self._speakers = list(FALLBACK_SPEAKERS)
-        self._languages = list(FALLBACK_LANGUAGES)
-        self._supports_instruct = False
+        self._last_preflight: GpuPreflightResult | None = None
+        self._last_worker_exit_code: int | None = None
+        self._model_loaded = False
         self._load_count = 0
-
-    @staticmethod
-    def _default_torch_loader() -> Any:
-        import torch
-
-        return torch
-
-    @staticmethod
-    def _default_model_loader(config: QwenServiceConfig, torch_module: Any) -> Any:
-        from qwen_tts import Qwen3TTSModel
-
-        return Qwen3TTSModel.from_pretrained(
-            config.model,
-            device_map=config.device,
-            dtype=torch_module.bfloat16,
-            attn_implementation=config.attention,
+        self._capabilities = self._fallback_capabilities()
+        self._closing = threading.Event()
+        self._dispatcher = threading.Thread(
+            target=self._dispatch_loop,
+            name="qwen-job-dispatcher",
+            daemon=True,
         )
 
-    @staticmethod
-    def _default_wave_writer(path: Path, waveform: Any, sample_rate: int) -> None:
-        import soundfile as sf
+    def start(self) -> None:
+        if not self._dispatcher.is_alive():
+            self._state = "idle"
+            self._dispatcher.start()
+            self._log("controller_started", creation_method=self.creation_method)
 
-        sf.write(path, waveform, sample_rate, subtype="PCM_16", format="WAV")
-
-    @staticmethod
-    def _default_finite_checker(waveform: Any) -> bool:
-        import numpy as np
-
-        return bool(np.isfinite(waveform).all())
-
-    def initialize(self) -> None:
-        try:
-            torch_module = self._get_torch()
-            if not torch_module.cuda.is_available():
-                raise RuntimeError("CUDA no está disponible")
-            if not torch_module.cuda.is_bf16_supported():
-                raise RuntimeError("La GPU no soporta bfloat16")
-        except Exception as exc:
-            self._set_state("error", str(exc))
-            raise
-        self._set_state("idle", None)
-
-    def _get_torch(self) -> Any:
-        if self._torch is None:
-            self._torch = self._torch_loader()
-        return self._torch
-
-    def _set_state(self, state: str, error: str | None = None) -> None:
-        with self._state_lock:
-            self._state = state
-            self._last_error = error
-
-    def _ensure_model(self) -> Any:
-        if self._model is not None:
-            return self._model
-        self._set_state("loading_model")
-        try:
-            model = self._model_loader(self.config, self._get_torch())
-            speakers = [str(value).lower() for value in model.get_supported_speakers()]
-            languages = [str(value).lower() for value in model.get_supported_languages()]
-            if speakers:
-                self._speakers = speakers
-            if languages:
-                self._languages = languages
-            size = str(getattr(getattr(model, "model", None), "tts_model_size", ""))
-            self._supports_instruct = size not in "0b6"
-            self._model = model
-            self._load_count += 1
-            return model
-        except Exception as exc:
-            self._set_state("error", str(exc))
-            raise
-
-    def _gpu_details(self) -> dict[str, object]:
-        torch_module = self._get_torch()
-        cuda = torch_module.cuda
-        available = bool(cuda.is_available())
-        free: int | None = None
-        total: int | None = None
-        if available:
-            with contextlib.suppress(AttributeError, RuntimeError):
-                free, total = (int(value) for value in cuda.mem_get_info(0))
-        return {
-            "torch": str(torch_module.__version__),
-            "cuda_available": available,
-            "cuda_version": str(getattr(getattr(torch_module, "version", None), "cuda", "")),
-            "bf16": bool(available and cuda.is_bf16_supported()),
-            "gpu": str(cuda.get_device_name(0)) if available else None,
-            "vram_free_bytes": free,
-            "vram_total_bytes": total,
+    def _log(self, event: str, **details: object) -> None:
+        record = {
+            "timestamp": time.time(),
+            "event": event,
+            **details,
         }
+        try:
+            self.config.controller_log_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            with self.config.controller_log_file.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+        except OSError:
+            return
 
-    def health(self) -> dict[str, object]:
-        with self._state_lock:
-            state = self._state
-            error = self._last_error
-        return {
-            "ok": state != "error",
-            "service": "speechnote-dialogue-studio-qwen",
-            "state": state,
-            "model": self.config.model,
-            "model_loaded": self._model is not None,
-            "load_count": self._load_count,
-            "device": self.config.device,
-            "dtype": self.config.dtype,
-            "attention": self.config.attention,
-            "native_sample_rate": 24_000,
-            "last_error": error,
-            **self._gpu_details(),
-        }
-
-    def capabilities(self) -> dict[str, object]:
+    @staticmethod
+    def _fallback_capabilities() -> dict[str, object]:
         return {
             "ok": True,
-            "speakers": list(self._speakers),
-            "languages": list(self._languages),
-            "source": "model" if self._model is not None else "verified_fallback",
-            "supports_instruct": self._supports_instruct,
+            "speakers": list(FALLBACK_SPEAKERS),
+            "languages": list(FALLBACK_LANGUAGES),
+            "source": "verified_fallback",
+            "supports_instruct": False,
             "supports_voice_design": False,
             "supports_voice_cloning": False,
             "supports_sampling_controls": True,
@@ -335,127 +293,442 @@ class QwenRuntime:
             "defaults": dict(DEFAULT_GENERATION_OPTIONS),
         }
 
-    def synthesize(self, payload: object) -> dict[str, object]:
-        if not isinstance(payload, dict):
-            raise QwenServiceError("invalid_request", "El cuerpo debe ser un objeto JSON")
-        text = payload.get("text")
-        speaker = payload.get("speaker")
-        language = payload.get("language", "auto")
-        instruct = payload.get("instruct")
-        if not isinstance(text, str) or not text.strip():
-            raise QwenServiceError("invalid_text", "text no puede estar vacío")
-        if len(text) > 20_000:
-            raise QwenServiceError("invalid_text", "text excede 20000 caracteres")
-        if not isinstance(speaker, str) or speaker.lower() not in self._speakers:
-            raise QwenServiceError("invalid_speaker", "La voz Qwen no está soportada")
-        if not isinstance(language, str) or language.lower() not in self._languages:
-            raise QwenServiceError("invalid_language", "El idioma Qwen no está soportado")
-        if instruct is not None and not isinstance(instruct, str):
-            raise QwenServiceError("invalid_instruct", "instruct debe ser texto")
-        destination = _safe_output_path(self.config.output_root, payload.get("output_path"))
-        options = validate_generation_options(payload.get("generation_options"))
-        if not self._generation_lock.acquire(blocking=False):
+    def _worker_pid(self) -> int | None:
+        worker = self._worker
+        if worker is None or worker.process.poll() is not None:
+            return None
+        return int(worker.process.pid)
+
+    def preflight(self) -> GpuPreflightResult:
+        result = self._preflight_runner(
+            self.policy,
+            Path(sys.executable),
+            recognized_worker_pid=self._worker_pid(),
+            synthesis_in_progress=self._current_job is not None,
+            service_state="idle",
+        )
+        with self._lock:
+            self._last_preflight = result
+            if not result.allowed and self._state not in {"gpu_fault", "stopping"}:
+                self._state = "blocked"
+                self._last_error = result.blockers[0] if result.blockers else "Preflight bloqueado"
+            elif result.allowed and self._state == "blocked":
+                self._state = "idle"
+                self._last_error = None
+        self._log("preflight", allowed=result.allowed, blockers=list(result.blockers))
+        return result
+
+    def health(self) -> dict[str, object]:
+        worker_pid = self._worker_pid()
+        with self._lock:
+            queue_items = [
+                {"request_id": job.request_id, "stage": job.stage}
+                for job in self._known_jobs.values()
+                if not job.done.is_set()
+            ]
+            return {
+                "ok": self._state not in {"error", "gpu_fault"},
+                "service": "speechnote-dialogue-studio-qwen",
+                "state": self._state,
+                "model": self.config.model,
+                "model_loaded": self._model_loaded,
+                "load_count": self._load_count,
+                "device": self.config.device,
+                "dtype": self.config.dtype,
+                "attention": self.config.attention,
+                "native_sample_rate": 24_000,
+                "last_error": self._last_error,
+                "worker_pid": worker_pid,
+                "worker_alive": worker_pid is not None,
+                "worker_creation_method": self.creation_method,
+                "worker_exit_code": self._last_worker_exit_code,
+                "queue": queue_items,
+                "current_stage": self._current_job.stage if self._current_job else None,
+                "policy": self.policy.to_dict(),
+                "preflight": self._last_preflight.to_dict() if self._last_preflight else None,
+            }
+
+    def capabilities(self) -> dict[str, object]:
+        return dict(self._capabilities)
+
+    def _reader_loop(
+        self,
+        process: Any,
+        messages: queue.Queue[dict[str, Any]],
+    ) -> None:
+        if process.stdout is None:
+            messages.put({"event": "process_exit", "exit_code": process.poll()})
+            return
+        for line in process.stdout:
+            try:
+                message = json.loads(line)
+                if isinstance(message, dict):
+                    messages.put(message)
+                    continue
+            except json.JSONDecodeError:
+                pass
+            self._log("worker_output", line=line.rstrip()[:1000])
+        messages.put({"event": "process_exit", "exit_code": process.poll()})
+
+    def _start_worker(self) -> None:
+        if self._worker_pid() is not None:
+            return
+        self._state = "starting_worker"
+        environment = os.environ.copy()
+        self.config.worker_log_file.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with self.config.worker_log_file.open("ab", buffering=0) as error_log:
+            process = self._popen(
+                [sys.executable, "-m", "dialogue_studio.qwen_worker"],
+                cwd=Path(__file__).resolve().parents[1],
+                env=environment,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=error_log,
+                text=True,
+                bufsize=1,
+                start_new_session=True,
+                close_fds=True,
+            )
+        messages: queue.Queue[dict[str, Any]] = queue.Queue()
+        reader = threading.Thread(
+            target=self._reader_loop,
+            args=(process, messages),
+            name=f"qwen-worker-reader-{process.pid}",
+            daemon=True,
+        )
+        self._worker = WorkerHandle(process, messages, reader)
+        reader.start()
+        deadline = time.monotonic() + self.policy.worker_start_timeout_seconds
+        while time.monotonic() < deadline:
+            remaining = max(0.01, deadline - time.monotonic())
+            try:
+                message = messages.get(timeout=min(0.2, remaining))
+            except queue.Empty:
+                if process.poll() is not None:
+                    break
+                continue
+            if message.get("event") == "ready":
+                health = message.get("health")
+                if isinstance(health, dict):
+                    self._model_loaded = bool(health.get("model_loaded"))
+                self._state = "idle"
+                self._last_error = None
+                self._log("worker_started", worker_pid=process.pid)
+                return
+            if message.get("event") in {"fatal", "process_exit"}:
+                self._last_error = str(message.get("error") or "El worker terminó al iniciar")
+                break
+        self._terminate_worker("worker_start_timeout")
+        raise QwenServiceError(
+            "worker_start_timeout",
+            "El worker Qwen no inició dentro del tiempo permitido",
+            status=HTTPStatus.GATEWAY_TIMEOUT,
+            retryable=True,
+        )
+
+    def _write_worker(self, message: dict[str, object]) -> None:
+        worker = self._worker
+        if worker is None or worker.process.poll() is not None or worker.process.stdin is None:
             raise QwenServiceError(
-                "gpu_busy",
-                "Ya hay una síntesis Qwen realmente activa",
-                status=HTTPStatus.CONFLICT,
+                "worker_dead",
+                "El worker Qwen no está disponible",
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
                 retryable=True,
             )
-        partial: Path | None = None
-        started = time.monotonic()
         try:
-            model = self._ensure_model()
-            if instruct and not self._supports_instruct:
-                self._set_state("idle", None)
-                raise QwenServiceError(
-                    "unsupported_instruct",
-                    "El modelo Qwen 0.6B instalado no admite instruct",
-                )
-            self._set_state("generating")
-            torch_module = self._get_torch()
-            seed = int(options.pop("seed"))
-            devices = [0] if torch_module.cuda.is_available() else []
-            with torch_module.random.fork_rng(devices=devices, enabled=True):
-                torch_module.manual_seed(seed)
-                if devices:
-                    torch_module.cuda.manual_seed_all(seed)
-                call: dict[str, object] = {
-                    "text": text.strip(),
-                    "speaker": speaker.lower(),
-                    "language": language.lower(),
-                    "non_streaming_mode": True,
-                    **options,
-                }
-                if self._supports_instruct and instruct:
-                    call["instruct"] = instruct.strip()
-                waveforms, sample_rate = model.generate_custom_voice(**call)
-            if not waveforms:
-                raise RuntimeError("Qwen no devolvió audio")
-            waveform = waveforms[0]
-            if not self._finite_checker(waveform):
-                raise RuntimeError("Qwen produjo muestras NaN o infinitas")
-            sample_rate = int(sample_rate)
-            if sample_rate <= 0:
-                raise RuntimeError("Qwen devolvió una frecuencia inválida")
-            destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            partial = destination.parent / f".{destination.name}.{uuid4().hex}.partial"
-            self._wave_writer(partial, waveform, sample_rate)
-            with partial.open("rb") as handle:
-                header = handle.read(12)
-            if len(header) != 12 or header[:4] != b"RIFF" or header[8:12] != b"WAVE":
-                raise RuntimeError("La salida temporal Qwen no es RIFF/WAVE")
-            if destination.is_symlink():
-                raise RuntimeError("No se sobrescriben enlaces simbólicos")
-            os.replace(partial, destination)
-            partial = None
-            self._set_state("idle", None)
-            return {
-                "ok": True,
-                "output_path": str(destination),
-                "sample_rate": sample_rate,
-                "duration_seconds": len(waveform) / sample_rate,
-                "elapsed_seconds": time.monotonic() - started,
-                "speaker": speaker.lower(),
-                "language": language.lower(),
-            }
-        except QwenServiceError:
-            raise
-        except Exception as exc:
-            self._set_state("error", str(exc))
+            worker.process.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
+            worker.process.stdin.flush()
+        except (BrokenPipeError, OSError) as exc:
             raise QwenServiceError(
-                "generation_failed", str(exc), status=HTTPStatus.INTERNAL_SERVER_ERROR
+                "worker_dead",
+                "El worker Qwen terminó inesperadamente",
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+                retryable=True,
             ) from exc
-        finally:
-            self._generation_lock.release()
+
+    def _handle_status(self, message: dict[str, Any], job: QwenJob | None = None) -> str:
+        state = str(message.get("state") or "")
+        stages = {
+            "loading_model": "loading_model",
+            "model_loaded": "loading_model",
+            "generating": "generating",
+            "validating": "validating",
+            "idle": "finalized",
+        }
+        if job is not None and state in stages:
+            job.stage = stages[state]
+        if state == "model_loaded":
+            self._model_loaded = True
+            self._load_count += 1
+        if state:
+            self._state = state
+        return state
+
+    def _run_synthesis(self, job: QwenJob) -> dict[str, object]:
+        worker = self._worker
+        if worker is None:
+            raise QwenServiceError("worker_dead", "No existe worker Qwen")
+        request_id = job.request_id
+        job.stage = "loading_model" if not self._model_loaded else "generating"
+        phase = job.stage
+        timeout = (
+            self.policy.model_load_timeout_seconds
+            if phase == "loading_model"
+            else self.policy.synthesis_timeout_seconds
+        )
+        deadline = time.monotonic() + timeout
+        self._write_worker(
+            {"request_id": request_id, "command": "synthesize", "payload": job.payload}
+        )
+        while True:
+            if job.canceled:
+                self._terminate_worker("job_canceled")
+                raise QwenServiceError("canceled", "La síntesis Qwen fue cancelada")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                code = "model_load_timeout" if phase == "loading_model" else "synthesis_timeout"
+                self._terminate_worker(code)
+                raise QwenServiceError(
+                    code,
+                    "Qwen excedió el tiempo permitido durante "
+                    + ("la carga del modelo" if phase == "loading_model" else "la síntesis"),
+                    status=HTTPStatus.GATEWAY_TIMEOUT,
+                    retryable=True,
+                )
+            try:
+                message = worker.messages.get(timeout=min(0.2, remaining))
+            except queue.Empty:
+                if worker.process.poll() is not None:
+                    self._worker_exited(worker)
+                    raise QwenServiceError(
+                        "worker_dead",
+                        "El worker Qwen terminó durante la síntesis",
+                        status=HTTPStatus.SERVICE_UNAVAILABLE,
+                        retryable=True,
+                    ) from None
+                continue
+            event = message.get("event")
+            if event == "status" and message.get("request_id") in {request_id, None}:
+                state = self._handle_status(message, job)
+                if state == "generating" and phase != "generating":
+                    phase = "generating"
+                    deadline = time.monotonic() + self.policy.synthesis_timeout_seconds
+                continue
+            if event == "response" and message.get("request_id") == request_id:
+                error = message.get("error")
+                if isinstance(error, dict):
+                    raise QwenServiceError(
+                        str(error.get("code") or "worker_error"),
+                        str(error.get("message") or "El worker Qwen falló"),
+                        status=int(error.get("status") or HTTPStatus.INTERNAL_SERVER_ERROR),
+                        retryable=bool(error.get("retryable")),
+                    )
+                result = message.get("result")
+                if not isinstance(result, dict):
+                    raise QwenServiceError("worker_protocol", "Respuesta inválida del worker")
+                self._state = "idle"
+                return result
+            if event in {"fatal", "process_exit"}:
+                self._worker_exited(worker)
+                raise QwenServiceError(
+                    "worker_dead",
+                    str(message.get("error") or "El worker Qwen terminó inesperadamente"),
+                    status=HTTPStatus.SERVICE_UNAVAILABLE,
+                    retryable=True,
+                )
+
+    def _worker_exited(self, worker: WorkerHandle) -> None:
+        self._last_worker_exit_code = worker.process.poll()
+        if self._worker is worker:
+            self._worker = None
+        self._model_loaded = False
+
+    def _command_worker(self, action: str, *, timeout: float = 30) -> dict[str, object]:
+        worker = self._worker
+        if worker is None or self._worker_pid() is None:
+            return {"ok": True, "worker_running": False}
+        request_id = uuid4().hex
+        with self._worker_io_lock:
+            self._write_worker({"request_id": request_id, "command": action})
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                try:
+                    message = worker.messages.get(timeout=0.2)
+                except queue.Empty:
+                    if worker.process.poll() is not None:
+                        self._worker_exited(worker)
+                        break
+                    continue
+                if message.get("event") == "status":
+                    self._handle_status(message)
+                    continue
+                if (
+                    message.get("event") == "response"
+                    and message.get("request_id") == request_id
+                ):
+                    result = message.get("result")
+                    if isinstance(result, dict):
+                        if action == "unload":
+                            self._model_loaded = False
+                        return result
+                if message.get("event") in {"fatal", "process_exit"}:
+                    self._worker_exited(worker)
+                    break
+        raise QwenServiceError(
+            "worker_timeout",
+            f"El worker no respondió a {action}",
+            status=HTTPStatus.GATEWAY_TIMEOUT,
+            retryable=True,
+        )
+
+    def _terminate_worker(self, reason: str) -> dict[str, object]:
+        worker = self._worker
+        if worker is None:
+            self._model_loaded = False
+            return {"ok": True, "stopped": False, "reason": reason}
+        process = worker.process
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=self.policy.terminate_grace_seconds)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        self._last_worker_exit_code = process.poll()
+        self._worker = None
+        self._model_loaded = False
+        self._log(
+            "worker_stopped",
+            reason=reason,
+            worker_pid=getattr(process, "pid", None),
+            exit_code=self._last_worker_exit_code,
+        )
+        if self._state not in {"gpu_fault", "stopping"}:
+            self._state = "idle"
+        return {"ok": True, "stopped": True, "reason": reason}
 
     def unload(self) -> dict[str, object]:
-        if not self._generation_lock.acquire(blocking=False):
+        if self._current_job is not None:
             raise QwenServiceError(
                 "gpu_busy",
                 "No se puede descargar el modelo durante una síntesis",
                 status=HTTPStatus.CONFLICT,
                 retryable=True,
             )
-        try:
-            was_loaded = self._model is not None
-            self._model = None
-            if self._torch is not None:
-                import gc
+        return self._command_worker("unload")
 
-                gc.collect()
-                self._torch.cuda.empty_cache()
-            self._set_state("idle", None)
-            return {"ok": True, "unloaded": was_loaded}
-        finally:
-            self._generation_lock.release()
+    def stop_worker(self) -> dict[str, object]:
+        if self._current_job is not None:
+            raise QwenServiceError(
+                "gpu_busy",
+                "Cancela la síntesis actual antes de detener el worker",
+                status=HTTPStatus.CONFLICT,
+                retryable=True,
+            )
+        return self._terminate_worker("manual_stop")
+
+    def submit(self, payload: object) -> dict[str, object]:
+        if not isinstance(payload, dict):
+            raise QwenServiceError("invalid_request", "El cuerpo debe ser un objeto JSON")
+        if self._closing.is_set():
+            raise QwenServiceError(
+                "service_stopping",
+                "El servicio Qwen se está deteniendo",
+                status=HTTPStatus.SERVICE_UNAVAILABLE,
+            )
+        job = QwenJob(uuid4().hex, payload)
+        with self._lock:
+            self._known_jobs[job.request_id] = job
+        self._jobs.put(job)
+        job.done.wait()
+        if job.error is not None:
+            raise job.error
+        if job.result is None:
+            raise QwenServiceError("worker_protocol", "El trabajo Qwen no devolvió resultado")
+        return job.result
+
+    def cancel(self, *, stop_current: bool = True) -> dict[str, object]:
+        canceled = 0
+        with self._lock:
+            for job in self._known_jobs.values():
+                if job is self._current_job:
+                    if stop_current:
+                        job.canceled = True
+                    continue
+                if not job.done.is_set():
+                    job.canceled = True
+                    job.stage = "canceled"
+                    job.error = QwenServiceError("canceled", "Trabajo Qwen cancelado")
+                    job.done.set()
+                    canceled += 1
+        return {
+            "ok": True,
+            "canceled_pending": canceled,
+            "current_cancel_requested": bool(stop_current and self._current_job),
+        }
+
+    def _dispatch_loop(self) -> None:
+        while not self._closing.is_set():
+            job = self._jobs.get()
+            if job is None:
+                return
+            if job.canceled or job.done.is_set():
+                continue
+            with self._lock:
+                self._current_job = job
+            try:
+                job.stage = "preflight"
+                preflight = self.preflight()
+                if not preflight.allowed:
+                    detail = preflight.blockers[0] if preflight.blockers else "estado no seguro"
+                    raise QwenServiceError(
+                        "gpu_preflight_blocked",
+                        "Generación bloqueada para proteger la sesión gráfica. " + detail,
+                        status=HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+                job.stage = "starting_worker"
+                self._start_worker()
+                with self._worker_io_lock:
+                    job.result = self._run_synthesis(job)
+                job.stage = "finalized"
+                if self.policy.post_job_cooldown_seconds:
+                    time.sleep(self.policy.post_job_cooldown_seconds)
+            except QwenServiceError as exc:
+                job.stage = "canceled" if exc.code == "canceled" else "error"
+                job.error = exc
+                self._last_error = str(exc)
+                if self._state not in {"gpu_fault", "blocked"}:
+                    self._state = "idle" if exc.retryable else "error"
+            except Exception as exc:
+                job.stage = "error"
+                job.error = QwenServiceError(
+                    "controller_error", str(exc), status=HTTPStatus.INTERNAL_SERVER_ERROR
+                )
+                self._last_error = str(exc)
+                self._state = "error"
+            finally:
+                with self._lock:
+                    self._current_job = None
+                job.done.set()
+
+    def close(self) -> None:
+        self._state = "stopping"
+        self._closing.set()
+        self.cancel(stop_current=True)
+        self._terminate_worker("controller_shutdown")
+        self._jobs.put(None)
+        if self._dispatcher.is_alive() and threading.current_thread() is not self._dispatcher:
+            self._dispatcher.join(timeout=2)
+        self._state = "offline"
+        self._log("controller_stopped")
 
 
 class QwenHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address: tuple[str, int], runtime: QwenRuntime):
+    def __init__(self, address: tuple[str, int], controller: QwenController):
         super().__init__(address, QwenRequestHandler)
-        self.runtime = runtime
+        self.controller = controller
 
 
 class QwenRequestHandler(BaseHTTPRequestHandler):
@@ -491,7 +764,7 @@ class QwenRequestHandler(BaseHTTPRequestHandler):
             error.status,
             {
                 "ok": False,
-                "state": self.server.runtime.health()["state"],
+                "state": self.server.controller.health()["state"],
                 "error": {
                     "code": error.code,
                     "message": str(error),
@@ -503,9 +776,11 @@ class QwenRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         try:
             if self.path == "/health":
-                self._send(HTTPStatus.OK, self.server.runtime.health())
+                self._send(HTTPStatus.OK, self.server.controller.health())
             elif self.path == "/capabilities":
-                self._send(HTTPStatus.OK, self.server.runtime.capabilities())
+                self._send(HTTPStatus.OK, self.server.controller.capabilities())
+            elif self.path == "/preflight":
+                self._send(HTTPStatus.OK, self.server.controller.preflight().to_dict())
             else:
                 raise QwenServiceError("not_found", "Endpoint desconocido", status=404)
         except QwenServiceError as exc:
@@ -514,11 +789,21 @@ class QwenRequestHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         try:
             if self.path == "/synthesize":
-                self._send(HTTPStatus.OK, self.server.runtime.synthesize(self._payload()))
+                self._send(HTTPStatus.OK, self.server.controller.submit(self._payload()))
             elif self.path == "/unload":
-                self._send(HTTPStatus.OK, self.server.runtime.unload())
+                self._send(HTTPStatus.OK, self.server.controller.unload())
+            elif self.path == "/worker/stop":
+                self._send(HTTPStatus.OK, self.server.controller.stop_worker())
+            elif self.path == "/cancel":
+                payload = self._payload()
+                stop_current = (
+                    not isinstance(payload, dict) or payload.get("stop_current") is not False
+                )
+                self._send(
+                    HTTPStatus.OK,
+                    self.server.controller.cancel(stop_current=stop_current),
+                )
             elif self.path == "/shutdown":
-                self.server.runtime.unload()
                 self._send(HTTPStatus.OK, {"ok": True, "state": "offline"})
                 threading.Thread(target=self.server.shutdown, daemon=True).start()
             else:
@@ -578,10 +863,10 @@ def _release_pid_file(path: Path) -> None:
 def serve(config: QwenServiceConfig) -> None:
     _claim_pid_file(config.pid_file)
     server: QwenHTTPServer | None = None
+    controller = QwenController(config)
     try:
-        runtime = QwenRuntime(config)
-        runtime.initialize()
-        server = QwenHTTPServer((config.host, config.port), runtime)
+        controller.start()
+        server = QwenHTTPServer((config.host, config.port), controller)
 
         def stop(_signum: int, _frame: object) -> None:
             threading.Thread(target=server.shutdown, daemon=True).start()
@@ -589,15 +874,15 @@ def serve(config: QwenServiceConfig) -> None:
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)
         server.serve_forever(poll_interval=0.25)
-        runtime.unload()
     finally:
+        controller.close()
         if server is not None:
             server.server_close()
         _release_pid_file(config.pid_file)
 
 
 def main() -> None:
-    argparse.ArgumentParser(description="Servicio local aislado Qwen3-TTS").parse_args()
+    argparse.ArgumentParser(description="Controller local aislado Qwen3-TTS").parse_args()
     serve(QwenServiceConfig.from_env())
 
 
