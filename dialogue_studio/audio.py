@@ -98,6 +98,34 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def probe_wave(path: Path) -> AudioInfo:
+    """Inspect an uncompressed WAV without requiring FFmpeg or ffprobe."""
+
+    try:
+        with wave.open(str(path), "rb") as source:
+            if source.getcomptype() != "NONE":
+                raise AudioError("El WAV debe usar audio PCM sin compresión")
+            sample_width = source.getsampwidth()
+            codec = {
+                1: "pcm_u8",
+                2: "pcm_s16le",
+                3: "pcm_s24le",
+                4: "pcm_s32le",
+            }.get(sample_width)
+            if codec is None:
+                raise AudioError("El WAV usa un ancho de muestra no compatible")
+            sample_rate = source.getframerate()
+            frames = source.getnframes()
+            return AudioInfo(
+                codec=codec,
+                sample_rate=sample_rate,
+                channels=source.getnchannels(),
+                duration_seconds=frames / sample_rate if sample_rate else 0.0,
+            )
+    except (EOFError, wave.Error) as exc:
+        raise AudioError("El archivo no es un WAV válido") from exc
+
+
 def _atomic_copy(source: Path, destination: Path) -> None:
     if destination.is_symlink():
         raise AudioError("No se sobrescriben enlaces simbólicos")

@@ -3,14 +3,23 @@
 from __future__ import annotations
 
 import html
+from collections.abc import Container
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
 import streamlit as st
 
-from .audio import export_mp3, has_ffmpeg, probe_audio
-from .export import export_project_zip
+from .audio import export_mp3, has_ffmpeg, probe_audio, probe_wave, sha256_file
+from .export import (
+    export_project_zip,
+    individual_export_filename,
+    individual_export_widget_key,
+    individual_mp3_path,
+    individual_wav_source,
+    is_mp3_file,
+    prepare_individual_mp3,
+)
 from .models import (
     DialogueProject,
     SpeakerProfile,
@@ -278,7 +287,8 @@ def _valid_ready_audio(project_dir: Path | None, utterance: Utterance) -> Path |
             header = handle.read(12)
         if len(header) != 12 or header[:4] != b"RIFF" or header[8:12] != b"WAVE":
             return None
-        probe_audio(candidate)
+        if not probe_wave(candidate).is_master_format:
+            return None
     except (OSError, RuntimeError, ValueError):
         return None
     return candidate
@@ -745,6 +755,19 @@ def _qwen_defaults(config: SpeakerTTSConfig) -> dict[str, int | float]:
     return options
 
 
+def _selectbox_model_default(
+    state: Container[str],
+    key: str,
+    options: list[str],
+    selected: str,
+) -> dict[str, int]:
+    """Provide a model default only before Streamlit owns this widget key."""
+
+    if key in state:
+        return {}
+    return {"index": options.index(selected)}
+
+
 def _sampling_controls(
     config: SpeakerTTSConfig,
     *,
@@ -981,13 +1004,16 @@ def _render_speakers(
 
             if config.provider == "qwen":
                 voice_id = config.voice_id if config.voice_id in qwen_voices else qwen_voices[0]
+                voice_key = f"speaker-voice-{speaker.speaker_id}"
                 voice = st.selectbox(
                     "Voz",
                     qwen_voices,
-                    index=qwen_voices.index(voice_id),
                     format_func=lambda value: QWEN_VOICE_LABELS.get(value, value),
-                    key=f"speaker-voice-{speaker.speaker_id}",
+                    key=voice_key,
                     disabled=not capabilities.can_edit_project,
+                    **_selectbox_model_default(
+                        st.session_state, voice_key, qwen_voices, voice_id
+                    ),
                 )
                 language_id = (
                     config.language if config.language in qwen_languages else qwen_languages[0]
@@ -1032,13 +1058,16 @@ def _render_speakers(
                     current = (
                         config.voice_id if config.voice_id in speech_options else speech_options[0]
                     )
+                    voice_key = f"speaker-voice-{speaker.speaker_id}"
                     voice = st.selectbox(
                         "Voz",
                         speech_options,
-                        index=speech_options.index(current),
                         format_func=lambda value: speech_labels[value],
-                        key=f"speaker-voice-{speaker.speaker_id}",
+                        key=voice_key,
                         disabled=not capabilities.can_edit_project,
+                        **_selectbox_model_default(
+                            st.session_state, voice_key, speech_options, current
+                        ),
                     )
                     if voice != config.voice_id:
                         update_speaker_voice(
@@ -1509,6 +1538,111 @@ def _render_utterance_tts_override(
             st.rerun()
 
 
+def _cached_individual_mp3(
+    paths: AppPaths,
+    utterance: Utterance,
+    audio: Path | None,
+) -> Path | None:
+    if audio is None:
+        return None
+    digest = utterance.sha256
+    try:
+        candidate = individual_mp3_path(paths.temporary, utterance.utterance_id, digest or "")
+    except ValueError:
+        candidate = individual_mp3_path(
+            paths.temporary,
+            utterance.utterance_id,
+            sha256_file(audio),
+        )
+    return candidate if is_mp3_file(candidate) else None
+
+
+def _render_individual_exports(
+    column_wav: object,
+    column_mp3: object,
+    project: DialogueProject,
+    utterance: Utterance,
+    speaker: SpeakerProfile,
+    audio: Path | None,
+    paths: AppPaths,
+    diagnostics: dict[str, object],
+    capabilities: ProjectCapabilities,
+) -> None:
+    wav_name = individual_export_filename(
+        project.title,
+        utterance.order,
+        speaker.name,
+        "wav",
+    )
+    mp3_name = individual_export_filename(
+        project.title,
+        utterance.order,
+        speaker.name,
+        "mp3",
+    )
+    wav_key = individual_export_widget_key(utterance.utterance_id, "wav")
+    mp3_key = individual_export_widget_key(utterance.utterance_id, "mp3")
+    if audio is None:
+        column_wav.download_button(  # type: ignore[attr-defined]
+            "Crear WAV",
+            data=b"",
+            file_name=wav_name,
+            mime="audio/wav",
+            key=wav_key,
+            disabled=True,
+            use_container_width=True,
+        )
+    else:
+        source = individual_wav_source(audio)
+        with source.open("rb") as handle:
+            column_wav.download_button(  # type: ignore[attr-defined]
+                "Crear WAV",
+                data=handle,
+                file_name=wav_name,
+                mime="audio/wav",
+                key=wav_key,
+                on_click="ignore",
+                use_container_width=True,
+            )
+
+    cached_mp3 = _cached_individual_mp3(paths, utterance, audio)
+    if cached_mp3 is not None:
+        with cached_mp3.open("rb") as handle:
+            column_mp3.download_button(  # type: ignore[attr-defined]
+                "Descargar MP3",
+                data=handle,
+                file_name=mp3_name,
+                mime="audio/mpeg",
+                key=mp3_key,
+                on_click="ignore",
+                use_container_width=True,
+            )
+        return
+
+    can_create_mp3 = (
+        audio is not None
+        and bool(diagnostics["ffmpeg"])
+        and not capabilities.has_active_synthesis
+    )
+    if column_mp3.button(  # type: ignore[attr-defined]
+        "Crear MP3",
+        key=f"intervention-create-mp3-{utterance.utterance_id}",
+        disabled=not can_create_mp3,
+        use_container_width=True,
+    ):
+        try:
+            assert audio is not None
+            _, reused = prepare_individual_mp3(
+                audio,
+                paths.temporary,
+                utterance.utterance_id,
+            )
+            st.toast("MP3 ya disponible" if reused else "MP3 individual listo para descargar")
+            st.rerun()
+        except (OSError, RuntimeError, ValueError) as exc:
+            st.error(f"No se pudo crear el MP3 individual: {exc}")
+
+
 def _render_utterances(
     project: DialogueProject,
     store: ProjectStore,
@@ -1578,7 +1712,7 @@ def _render_utterances(
             if utterance_capabilities.can_play and audio:
                 with st.expander("Escuchar"):
                     st.audio(str(audio), format="audio/wav")
-            actions = st.columns([1.4, 0.75, 0.75, 0.75, 0.85])
+            actions = st.columns([1.25, 1, 1, 0.5, 0.5, 0.9, 0.9])
             generate_label = (
                 "Regenerar"
                 if utterance.audio_relative_path or utterance.status in {"ready", "stale", "error"}
@@ -1592,7 +1726,22 @@ def _render_utterances(
             ):
                 _generate_one(project, store, paths, utterance.utterance_id)
                 st.rerun()
-            if actions[1].button(
+            _render_individual_exports(
+                actions[1],
+                actions[2],
+                project,
+                utterance,
+                speaker,
+                audio,
+                paths,
+                diagnostics,
+                capabilities,
+            )
+            if audio is None:
+                st.caption("Genera primero esta intervención para exportar su audio.")
+            elif not bool(diagnostics["ffmpeg"]):
+                st.caption("El WAV está disponible; para crear MP3 se necesita FFmpeg.")
+            if actions[3].button(
                 "↑",
                 key=f"up-{utterance.utterance_id}",
                 disabled=index == 0 or not utterance_capabilities.can_edit,
@@ -1601,7 +1750,7 @@ def _render_utterances(
                 move_utterance(project, utterance.utterance_id, -1)
                 _reset_artifacts()
                 st.rerun()
-            if actions[2].button(
+            if actions[4].button(
                 "↓",
                 key=f"down-{utterance.utterance_id}",
                 disabled=(
@@ -1612,7 +1761,7 @@ def _render_utterances(
                 move_utterance(project, utterance.utterance_id, 1)
                 _reset_artifacts()
                 st.rerun()
-            if actions[3].button(
+            if actions[5].button(
                 "Duplicar",
                 key=f"duplicate-{utterance.utterance_id}",
                 disabled=not utterance_capabilities.can_edit,
@@ -1620,7 +1769,7 @@ def _render_utterances(
                 duplicate_utterance(project, utterance.utterance_id)
                 _reset_artifacts()
                 st.rerun()
-            if actions[4].button(
+            if actions[6].button(
                 "Eliminar",
                 key=f"delete-{utterance.utterance_id}",
                 disabled=not utterance_capabilities.can_edit,

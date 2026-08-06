@@ -186,6 +186,120 @@ def test_speechnote_refresh_preserves_last_seen_unassigned_voices_when_closed(
     assert _button(app, "Actualizar voces de Speech Note")
 
 
+def test_speaker_voice_uses_model_default_only_before_widget_state_exists(
+    monkeypatch, tmp_path: Path
+) -> None:
+    paths = AppPaths(tmp_path / "Música")
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: _diagnostics(tts_available=True))
+    calls = []
+    update = ui.update_speaker_voice
+
+    def tracked_update(project, speaker_id, model_id, model_label):
+        calls.append((speaker_id, model_id))
+        update(project, speaker_id, model_id, model_label)
+
+    monkeypatch.setattr(ui, "update_speaker_voice", tracked_update)
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    speaker = app.session_state.project.speakers[0]
+    key = f"speaker-voice-{speaker.speaker_id}"
+    options = ["voice-a", "voice-b"]
+
+    assert ui._selectbox_model_default({}, key, options, "voice-b") == {"index": 1}
+    assert ui._selectbox_model_default({key: "voice-b"}, key, options, "voice-b") == {}
+
+    voice = _keyed(app.selectbox, key)
+    voice.select("es_piper_es_sharvard_medium_1").run()
+    app.run()
+
+    assert calls == [(speaker.speaker_id, "es_piper_es_sharvard_medium_1")]
+    assert app.session_state.project.speakers[0].tts_config.voice_id == (
+        "es_piper_es_sharvard_medium_1"
+    )
+    assert _keyed(app.selectbox, key).value == "es_piper_es_sharvard_medium_1"
+
+
+def test_individual_export_controls_require_ready_audio_and_keep_uuid_keys(
+    monkeypatch, make_wav, tmp_path: Path
+) -> None:
+    paths = AppPaths(tmp_path / "Música")
+    diagnostics = _diagnostics(tts_available=False)
+    diagnostics["ffmpeg"] = False
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: diagnostics)
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    utterance = app.session_state.project.utterances[0]
+    wav_key = f"intervention-export-wav-{utterance.utterance_id}"
+    mp3_create_key = f"intervention-create-mp3-{utterance.utterance_id}"
+
+    assert _keyed(app.download_button, wav_key).disabled
+    assert _keyed(app.button, mp3_create_key).disabled
+    assert any("genera primero" in item.value.lower() for item in app.caption)
+
+    _button(app, "Guardar proyecto").click().run()
+    project_dir = Path(app.session_state.project_dir)
+    audio = make_wav(project_dir / "audio" / "normalized" / f"{utterance.utterance_id}.wav")
+    utterance = app.session_state.project.utterances[0]
+    utterance.audio_relative_path = audio.relative_to(project_dir).as_posix()
+    utterance.sha256 = ui.sha256_file(audio)
+    utterance.duration_seconds = 0.1
+    utterance.status = "ready"
+    app.run()
+
+    assert not _keyed(app.download_button, wav_key).disabled
+    assert _keyed(app.button, mp3_create_key).disabled
+    assert any("necesita ffmpeg" in item.value.lower() for item in app.caption)
+
+    _button(app, "＋ Añadir intervención").click().run()
+    duplicate = app.session_state.project.utterances[1]
+    assert duplicate.utterance_id != utterance.utterance_id
+    assert _keyed(
+        app.download_button, f"intervention-export-wav-{duplicate.utterance_id}"
+    ).disabled
+    _keyed(app.button, f"up-{duplicate.utterance_id}").click().run()
+    assert not _keyed(app.download_button, wav_key).disabled
+
+
+@pytest.mark.skipif(not ui.has_ffmpeg(), reason="FFmpeg no disponible")
+def test_individual_mp3_button_converts_once_then_exposes_download(
+    monkeypatch, make_wav, tmp_path: Path
+) -> None:
+    paths = AppPaths(tmp_path / "Música")
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: _diagnostics(tts_available=False))
+    calls = []
+    prepare = ui.prepare_individual_mp3
+
+    def tracked_prepare(source, temporary_root, utterance_id):
+        calls.append((source, utterance_id))
+        return prepare(source, temporary_root, utterance_id)
+
+    monkeypatch.setattr(ui, "prepare_individual_mp3", tracked_prepare)
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    utterance = app.session_state.project.utterances[0]
+    _button(app, "Guardar proyecto").click().run()
+    project_dir = Path(app.session_state.project_dir)
+    audio = make_wav(project_dir / "audio" / "normalized" / f"{utterance.utterance_id}.wav")
+    utterance = app.session_state.project.utterances[0]
+    utterance.audio_relative_path = audio.relative_to(project_dir).as_posix()
+    utterance.sha256 = ui.sha256_file(audio)
+    utterance.duration_seconds = 0.1
+    utterance.status = "ready"
+    app.run()
+
+    _keyed(app.button, f"intervention-create-mp3-{utterance.utterance_id}").click().run()
+
+    mp3_key = f"intervention-export-mp3-{utterance.utterance_id}"
+    assert calls == [(audio, utterance.utterance_id)]
+    assert _keyed(app.download_button, mp3_key).label == "Descargar MP3"
+    assert app.session_state.project.utterances[0].audio_relative_path == (
+        audio.relative_to(project_dir).as_posix()
+    )
+    app.run()
+    assert calls == [(audio, utterance.utterance_id)]
+    assert _keyed(app.download_button, mp3_key)
+
+
 def test_stale_legacy_busy_flag_recovers_without_locking_editing(
     monkeypatch, tmp_path: Path
 ) -> None:

@@ -6,9 +6,24 @@ from pathlib import Path
 
 import pytest
 
-from dialogue_studio.audio import concatenate_waves, sha256_file
-from dialogue_studio.export import export_project_zip
+from dialogue_studio.audio import (
+    AudioError,
+    concatenate_waves,
+    has_ffmpeg,
+    probe_audio,
+    sha256_file,
+)
+from dialogue_studio.export import (
+    export_project_zip,
+    individual_export_filename,
+    individual_export_widget_key,
+    individual_mp3_path,
+    individual_wav_source,
+    is_mp3_file,
+    prepare_individual_mp3,
+)
 from dialogue_studio.models import DialogueProject
+from dialogue_studio.service import duplicate_utterance, move_utterance
 from dialogue_studio.storage import deterministic_json
 
 
@@ -97,3 +112,106 @@ def test_zip_without_audio_marks_pending_and_keeps_script(make_wav, tmp_path: Pa
         assert "speech-dialogue-project/script/dialogue.txt" in names
         assert "speech-dialogue-project/audio/dialogue.wav" not in names
         assert not any("/audio/segments/" in name for name in names)
+
+
+def test_individual_wav_reuses_only_the_selected_segment(make_wav, tmp_path: Path) -> None:
+    selected = make_wav(tmp_path / "selected.wav", duration=0.1)
+    other = make_wav(tmp_path / "other.wav", duration=0.35)
+
+    exported = individual_wav_source(selected)
+
+    assert exported == selected
+    assert exported.read_bytes() == selected.read_bytes()
+    assert exported.read_bytes() != other.read_bytes()
+    assert exported.read_bytes()[:4] == b"RIFF"
+    assert exported.read_bytes()[8:12] == b"WAVE"
+
+
+@pytest.mark.skipif(not has_ffmpeg(), reason="FFmpeg no disponible")
+def test_individual_mp3_contains_only_one_segment_and_is_cached(
+    make_wav, tmp_path: Path
+) -> None:
+    project = DialogueProject.sample()
+    selected = make_wav(tmp_path / "selected.wav", duration=0.1)
+    other = make_wav(tmp_path / "other.wav", duration=0.4)
+    utterance_id = project.utterances[0].utterance_id
+
+    mp3, reused = prepare_individual_mp3(selected, tmp_path / "temporary", utterance_id)
+    first_mtime = mp3.stat().st_mtime_ns
+    cached, reused_cached = prepare_individual_mp3(
+        selected, tmp_path / "temporary", utterance_id
+    )
+
+    assert not reused
+    assert reused_cached
+    assert cached == mp3
+    assert cached.stat().st_mtime_ns == first_mtime
+    assert is_mp3_file(cached)
+    assert cached.read_bytes()[:3] == b"ID3" or cached.read_bytes()[:1] == b"\xff"
+    assert probe_audio(cached).codec == "mp3"
+    assert probe_audio(cached).duration_seconds == pytest.approx(0.1, abs=0.05)
+    assert probe_audio(cached).duration_seconds < probe_audio(other).duration_seconds
+
+
+def test_individual_export_names_paths_and_keys_are_safe_and_uuid_scoped(tmp_path: Path) -> None:
+    project = DialogueProject.sample()
+    first, second = project.utterances[:2]
+    first_name = individual_export_filename(
+        "../Álgebra / Redes", first.order, "Estudiante: uno", "wav"
+    )
+    second_name = individual_export_filename(
+        "../Álgebra / Redes", second.order, "Estudiante: uno", ".mp3"
+    )
+    digest = "a" * 64
+    first_path = individual_mp3_path(tmp_path, first.utterance_id, digest)
+    second_path = individual_mp3_path(tmp_path, second.utterance_id, digest)
+
+    assert first_name == "algebra_redes_intervencion_01_estudiante_uno.wav"
+    assert second_name == "algebra_redes_intervencion_02_estudiante_uno.mp3"
+    assert "/" not in first_name and "\\" not in first_name and ".." not in first_name
+    assert first_path != second_path
+    assert tmp_path.resolve() in first_path.parents
+    assert individual_export_widget_key(first.utterance_id, "wav") != (
+        individual_export_widget_key(second.utterance_id, "wav")
+    )
+
+
+def test_reordering_keeps_uuid_export_association_and_duplicate_has_new_identity(
+    tmp_path: Path,
+) -> None:
+    project = DialogueProject.sample()
+    source = project.utterances[0]
+    digest = "b" * 64
+    original_path = individual_mp3_path(tmp_path, source.utterance_id, digest)
+
+    move_utterance(project, source.utterance_id, 1)
+    moved = next(item for item in project.utterances if item.utterance_id == source.utterance_id)
+    duplicate = duplicate_utterance(project, source.utterance_id)
+
+    assert moved.order == 2
+    assert individual_mp3_path(tmp_path, moved.utterance_id, digest) == original_path
+    assert duplicate.utterance_id != source.utterance_id
+    assert duplicate.audio_relative_path is None
+    assert individual_export_widget_key(duplicate.utterance_id, "mp3") != (
+        individual_export_widget_key(source.utterance_id, "mp3")
+    )
+
+
+def test_individual_mp3_failure_is_reported_without_partial_artifact(
+    monkeypatch, make_wav, tmp_path: Path
+) -> None:
+    project = DialogueProject.new()
+    source = make_wav(tmp_path / "source.wav")
+
+    def unavailable(*_args, **_kwargs):
+        raise AudioError("FFmpeg no está disponible; el WAV sigue operativo")
+
+    monkeypatch.setattr("dialogue_studio.export.export_mp3", unavailable)
+
+    with pytest.raises(AudioError, match="WAV sigue operativo"):
+        prepare_individual_mp3(
+            source,
+            tmp_path / "temporary",
+            project.utterances[0].utterance_id,
+        )
+    assert not list((tmp_path / "temporary").rglob("*.mp3"))

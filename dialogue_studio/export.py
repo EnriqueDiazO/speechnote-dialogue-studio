@@ -10,12 +10,105 @@ import zipfile
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from typing import Any
+from uuid import UUID
 
-from .audio import probe_audio, sha256_file
+from .audio import AudioError, export_mp3, probe_audio, probe_wave, sha256_file
 from .models import DialogueProject
+from .paths import safe_write_path, slugify
 from .storage import atomic_write_text, deterministic_json
 
 ZIP_ROOT = PurePosixPath("speech-dialogue-project")
+INDIVIDUAL_EXPORT_ROOT = PurePosixPath("individual-exports")
+
+
+def individual_export_filename(
+    project_title: str,
+    order: int,
+    speaker_name: str,
+    extension: str,
+) -> str:
+    """Return a predictable download name with no path-significant characters."""
+
+    normalized_extension = extension.lower().lstrip(".")
+    if normalized_extension not in {"wav", "mp3"}:
+        raise ValueError("La exportación individual sólo admite WAV o MP3")
+    if order < 1:
+        raise ValueError("El número de intervención debe ser positivo")
+    project_slug = slugify(project_title).replace("-", "_")
+    speaker_slug = slugify(speaker_name).replace("-", "_")
+    return (
+        f"{project_slug}_intervencion_{order:02d}_{speaker_slug}."
+        f"{normalized_extension}"
+    )
+
+
+def individual_export_widget_key(utterance_id: str, extension: str) -> str:
+    """Build a stable widget key from the persistent utterance identity."""
+
+    UUID(utterance_id)
+    normalized_extension = extension.lower().lstrip(".")
+    if normalized_extension not in {"wav", "mp3"}:
+        raise ValueError("La exportación individual sólo admite WAV o MP3")
+    return f"intervention-export-{normalized_extension}-{utterance_id}"
+
+
+def individual_mp3_path(
+    temporary_root: Path,
+    utterance_id: str,
+    source_sha256: str,
+) -> Path:
+    """Resolve the cached MP3 path without using order or user-provided names."""
+
+    UUID(utterance_id)
+    digest = source_sha256.lower()
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ValueError("La huella del WAV no es válida")
+    relative = INDIVIDUAL_EXPORT_ROOT / utterance_id / f"{digest}.mp3"
+    return safe_write_path(temporary_root, relative)
+
+
+def is_mp3_file(path: Path) -> bool:
+    """Perform a cheap container signature check for a cached MP3 artifact."""
+
+    try:
+        with path.open("rb") as handle:
+            header = handle.read(3)
+    except OSError:
+        return False
+    return header == b"ID3" or (
+        len(header) >= 2 and header[0] == 0xFF and header[1] & 0xE0 == 0xE0
+    )
+
+
+def individual_wav_source(source_wav: Path) -> Path:
+    """Validate and reuse one normalized intervention WAV without copying it."""
+
+    info = probe_wave(source_wav)
+    if not info.is_master_format:
+        raise AudioError("El audio individual no tiene el formato WAV maestro esperado")
+    return source_wav
+
+
+def prepare_individual_mp3(
+    source_wav: Path,
+    temporary_root: Path,
+    utterance_id: str,
+) -> tuple[Path, bool]:
+    """Create or reuse the MP3 for exactly one normalized intervention."""
+
+    individual_wav_source(source_wav)
+    destination = individual_mp3_path(
+        temporary_root,
+        utterance_id,
+        sha256_file(source_wav),
+    )
+    if is_mp3_file(destination):
+        return destination, True
+    info = export_mp3(source_wav, destination)
+    if info.codec != "mp3" or not is_mp3_file(destination):
+        destination.unlink(missing_ok=True)
+        raise AudioError("FFmpeg no produjo un archivo MP3 válido")
+    return destination, False
 
 
 def _safe_source(path: Path, project_dir: Path) -> Path:

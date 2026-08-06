@@ -54,10 +54,12 @@ make qwen-stop
 3. Elige proveedor, voz e idioma por personaje. Una intervención puede tener un override propio.
 4. Pulsa **Generar** en una tarjeta o **Generar pendientes**. Editar el texto, el hablante o su
    voz marca el audio como desactualizado, pero conserva la toma anterior.
-5. Cuando todas estén listas, pulsa **Construir diálogo**. El master usa PCM de 16 bits,
+5. En cada tarjeta lista, **Crear WAV** descarga sólo esa intervención. **Crear MP3** prepara la
+   conversión individual con FFmpeg y muestra su descarga sin volver a sintetizar.
+6. Cuando todas estén listas, pulsa **Construir diálogo**. El master usa PCM de 16 bits,
    48 kHz, mono, y la pausa configurada entre intervenciones.
-6. Escucha el resultado, descarga WAV, crea el MP3 opcional o exporta el proyecto ZIP portable.
-7. Guarda para reabrir el proyecto desde la barra lateral.
+7. Escucha el resultado, descarga WAV, crea el MP3 opcional o exporta el proyecto ZIP portable.
+8. Guarda para reabrir el proyecto desde la barra lateral.
 
 No cierres Speech Note mientras una voz Piper está trabajando. Las síntesis se ejecutan de forma
 secuencial; nunca se lanzan dos a la vez, incluso al comparar varias voces Qwen.
