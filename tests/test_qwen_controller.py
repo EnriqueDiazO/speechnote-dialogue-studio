@@ -64,6 +64,22 @@ def safe_preflight(*_args, **_kwargs) -> GpuPreflightResult:
     return GpuPreflightResult(allowed=True, timestamp="2026-08-05T00:00:00Z")
 
 
+def safe_metrics() -> dict[str, object]:
+    return {
+        "gpu_name": "Fake RTX",
+        "driver_version": "535.1",
+        "temperature_c": 45,
+        "gpu_util_percent": 20,
+        "vram_total_mb": 8192,
+        "vram_used_mb": 2048,
+        "vram_free_mb": 6144,
+    }
+
+
+def no_kernel_events(_window: int) -> tuple[str, ...]:
+    return ()
+
+
 def test_controller_spawns_exactly_one_managed_worker_without_fork(tmp_path) -> None:
     calls = []
     process = FakeProcess()
@@ -73,7 +89,11 @@ def test_controller_spawns_exactly_one_managed_worker_without_fork(tmp_path) -> 
         return process
 
     controller = QwenController(
-        config(tmp_path), popen=popen, preflight_runner=safe_preflight
+        config(tmp_path),
+        popen=popen,
+        preflight_runner=safe_preflight,
+        metric_sampler=safe_metrics,
+        kernel_sampler=no_kernel_events,
     )
     controller.start()
     try:
@@ -95,6 +115,8 @@ def test_controller_start_timeout_only_terminates_its_worker(tmp_path) -> None:
         config(tmp_path, worker_start_timeout_seconds=0),
         popen=lambda *_args, **_kwargs: process,
         preflight_runner=safe_preflight,
+        metric_sampler=safe_metrics,
+        kernel_sampler=no_kernel_events,
     )
     with pytest.raises(QwenServiceError) as error:
         controller._start_worker()
@@ -136,6 +158,8 @@ class SimulatedWorkerProcess:
         self.pid = SimulatedWorkerProcess.next_pid
         SimulatedWorkerProcess.next_pid += 1
         self.returncode = None
+        self.terminated = False
+        self.killed = False
         self.stdout = QueueOutput()
         self.stdin = self
         self.release = release
@@ -164,18 +188,24 @@ class SimulatedWorkerProcess:
             self.stdout.send(
                 {"event": "status", "state": "generating", "request_id": request_id}
             )
-            if self.release is not None:
-                self.release.wait(timeout=2)
+            def finish() -> None:
+                if self.release is not None:
+                    self.release.wait(timeout=2)
+                else:
+                    time.sleep(0.01)
+                self.stdout.send(
+                    {
+                        "event": "response",
+                        "request_id": request_id,
+                        "result": {"ok": True, "sequence": self.synthesis_count},
+                    }
+                )
+                self.active_syntheses -= 1
+
+            if self.release is None:
+                finish()
             else:
-                time.sleep(0.01)
-            self.stdout.send(
-                {
-                    "event": "response",
-                    "request_id": request_id,
-                    "result": {"ok": True, "sequence": self.synthesis_count},
-                }
-            )
-            self.active_syntheses -= 1
+                threading.Thread(target=finish, daemon=True).start()
         elif command["command"] == "unload":
             self.stdout.send(
                 {"event": "response", "request_id": request_id, "result": {"ok": True}}
@@ -190,10 +220,12 @@ class SimulatedWorkerProcess:
         return self.returncode
 
     def terminate(self) -> None:
+        self.terminated = True
         self.returncode = -15
         self.stdout.close()
 
     def kill(self) -> None:
+        self.killed = True
         self.returncode = -9
         self.stdout.close()
 
@@ -210,7 +242,11 @@ def test_concurrent_requests_use_one_worker_and_one_synthesis_at_a_time(tmp_path
         return process
 
     controller = QwenController(
-        config(tmp_path), popen=popen, preflight_runner=safe_preflight
+        config(tmp_path),
+        popen=popen,
+        preflight_runner=safe_preflight,
+        metric_sampler=safe_metrics,
+        kernel_sampler=no_kernel_events,
     )
     controller.start()
     results = []
@@ -240,6 +276,8 @@ def test_cancel_removes_pending_jobs_without_canceling_current_when_requested(tm
         config(tmp_path),
         popen=lambda *_args, **_kwargs: process,
         preflight_runner=safe_preflight,
+        metric_sampler=safe_metrics,
+        kernel_sampler=no_kernel_events,
     )
     controller.start()
     outcomes = []
@@ -266,4 +304,59 @@ def test_cancel_removes_pending_jobs_without_canceling_current_when_requested(tm
         assert values.count(True) == 1
     finally:
         release.set()
+        controller.close()
+
+
+def test_new_xid_terminates_worker_and_latches_gpu_fault(tmp_path) -> None:
+    release = threading.Event()
+    process = SimulatedWorkerProcess(release=release)
+    controller = QwenController(
+        config(
+            tmp_path,
+            monitor_interval_seconds=0.01,
+            kernel_poll_interval_seconds=0.01,
+        ),
+        popen=lambda *_args, **_kwargs: process,
+        preflight_runner=safe_preflight,
+        metric_sampler=safe_metrics,
+        kernel_sampler=lambda _window: ("kernel: NVRM: Xid 31, pid=9000",),
+    )
+    controller.start()
+    outcome = []
+
+    def submit() -> None:
+        try:
+            controller.submit({"text": "fault"})
+        except QwenServiceError as exc:
+            outcome.append(exc.code)
+
+    thread = threading.Thread(target=submit)
+    try:
+        thread.start()
+        thread.join(timeout=2)
+        assert outcome == ["gpu_fault"]
+        assert process.terminated is True
+        assert controller.health()["state"] == "gpu_fault"
+        assert "Xid nuevo" in str(controller.health()["gpu_fault_reason"])
+    finally:
+        release.set()
+        controller.close()
+
+
+def test_critical_temperature_stops_current_queue(tmp_path) -> None:
+    process = SimulatedWorkerProcess()
+    hot_metrics = {**safe_metrics(), "temperature_c": 80}
+    controller = QwenController(
+        config(tmp_path),
+        popen=lambda *_args, **_kwargs: process,
+        preflight_runner=safe_preflight,
+        metric_sampler=lambda: hot_metrics,
+        kernel_sampler=no_kernel_events,
+    )
+    controller._start_worker()
+    try:
+        blocker = controller._monitor_worker("generating", poll_kernel=False)
+        assert blocker is not None
+        assert "Temperatura GPU crítica" in blocker
+    finally:
         controller.close()

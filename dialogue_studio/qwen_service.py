@@ -17,14 +17,15 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .qwen_gpu_safety import GpuPreflightResult, GpuSafetyPolicy
-from .qwen_preflight import run_gpu_preflight
+from .qwen_gpu_safety import GpuMetricSnapshot, GpuPreflightResult, GpuSafetyPolicy
+from .qwen_preflight import collect_gpu_metrics, collect_kernel_events, run_gpu_preflight
 
 DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
 FALLBACK_SPEAKERS = (
@@ -229,11 +230,15 @@ class QwenController:
         *,
         popen: Callable[..., Any] = subprocess.Popen,
         preflight_runner: Callable[..., GpuPreflightResult] = run_gpu_preflight,
+        metric_sampler: Callable[[], dict[str, object]] = collect_gpu_metrics,
+        kernel_sampler: Callable[[int], tuple[str, ...]] = collect_kernel_events,
     ) -> None:
         self.config = config
         self.policy = config.policy
         self._popen = popen
         self._preflight_runner = preflight_runner
+        self._metric_sampler = metric_sampler
+        self._kernel_sampler = kernel_sampler
         self._lock = threading.RLock()
         self._worker_io_lock = threading.Lock()
         self._jobs: queue.Queue[QwenJob | None] = queue.Queue()
@@ -244,6 +249,9 @@ class QwenController:
         self._last_error: str | None = None
         self._last_preflight: GpuPreflightResult | None = None
         self._last_worker_exit_code: int | None = None
+        self._gpu_fault_reason: str | None = None
+        self._gpu_metrics: list[GpuMetricSnapshot] = []
+        self._baseline_kernel_events: set[str] = set()
         self._model_loaded = False
         self._load_count = 0
         self._capabilities = self._fallback_capabilities()
@@ -309,6 +317,7 @@ class QwenController:
         )
         with self._lock:
             self._last_preflight = result
+            self._baseline_kernel_events = set(result.recent_kernel_events)
             if not result.allowed and self._state not in {"gpu_fault", "stopping"}:
                 self._state = "blocked"
                 self._last_error = result.blockers[0] if result.blockers else "Preflight bloqueado"
@@ -346,6 +355,11 @@ class QwenController:
                 "current_stage": self._current_job.stage if self._current_job else None,
                 "policy": self.policy.to_dict(),
                 "preflight": self._last_preflight.to_dict() if self._last_preflight else None,
+                "gpu_fault_reason": self._gpu_fault_reason,
+                "latest_gpu_metric": (
+                    self._gpu_metrics[-1].to_dict() if self._gpu_metrics else None
+                ),
+                "gpu_metric_count": len(self._gpu_metrics),
             }
 
     def capabilities(self) -> dict[str, object]:
@@ -477,6 +491,8 @@ class QwenController:
             else self.policy.synthesis_timeout_seconds
         )
         deadline = time.monotonic() + timeout
+        next_metric_poll = time.monotonic()
+        next_kernel_poll = time.monotonic() + self.policy.kernel_poll_interval_seconds
         self._write_worker(
             {"request_id": request_id, "command": "synthesize", "payload": job.payload}
         )
@@ -496,7 +512,9 @@ class QwenController:
                     retryable=True,
                 )
             try:
-                message = worker.messages.get(timeout=min(0.2, remaining))
+                now = time.monotonic()
+                until_monitor = max(0.01, next_metric_poll - now)
+                message = worker.messages.get(timeout=min(until_monitor, remaining))
             except queue.Empty:
                 if worker.process.poll() is not None:
                     self._worker_exited(worker)
@@ -506,6 +524,22 @@ class QwenController:
                         status=HTTPStatus.SERVICE_UNAVAILABLE,
                         retryable=True,
                     ) from None
+                message = {}
+            now = time.monotonic()
+            if now >= next_metric_poll:
+                poll_kernel = now >= next_kernel_poll
+                blocker = self._monitor_worker(job.stage, poll_kernel=poll_kernel)
+                next_metric_poll = now + self.policy.monitor_interval_seconds
+                if poll_kernel:
+                    next_kernel_poll = now + self.policy.kernel_poll_interval_seconds
+                if blocker:
+                    self._set_gpu_fault(blocker)
+                    raise QwenServiceError(
+                        "gpu_fault",
+                        blocker,
+                        status=HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
+            if not message:
                 continue
             event = message.get("event")
             if event == "status" and message.get("request_id") in {request_id, None}:
@@ -536,6 +570,90 @@ class QwenController:
                     status=HTTPStatus.SERVICE_UNAVAILABLE,
                     retryable=True,
                 )
+
+    def _monitor_worker(self, phase: str, *, poll_kernel: bool) -> str | None:
+        worker_alive = self._worker_pid() is not None
+        try:
+            metrics = self._metric_sampler()
+        except RuntimeError as exc:
+            snapshot = GpuMetricSnapshot(
+                timestamp=datetime.now(timezone.utc).isoformat(),
+                phase=phase,
+                temperature_c=None,
+                gpu_util_percent=None,
+                vram_used_mb=None,
+                vram_free_mb=None,
+                worker_alive=worker_alive,
+            )
+            self._gpu_metrics.append(snapshot)
+            self._gpu_metrics = self._gpu_metrics[-1000:]
+            return str(exc) if self.policy.fail_closed else None
+
+        new_xids: tuple[str, ...] = ()
+        if poll_kernel:
+            try:
+                events = self._kernel_sampler(self.policy.recent_xid_window_seconds)
+            except RuntimeError as exc:
+                if self.policy.fail_closed:
+                    return str(exc)
+            else:
+                new_xids = tuple(
+                    event
+                    for event in events
+                    if "xid" in event.lower() and event not in self._baseline_kernel_events
+                )
+                self._baseline_kernel_events.update(events)
+        temperature = metrics.get("temperature_c")
+        utilization = metrics.get("gpu_util_percent")
+        total = metrics.get("vram_total_mb")
+        used = metrics.get("vram_used_mb")
+        free = metrics.get("vram_free_mb")
+        snapshot = GpuMetricSnapshot(
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            phase=phase,
+            temperature_c=temperature if isinstance(temperature, int) else None,
+            gpu_util_percent=utilization if isinstance(utilization, int) else None,
+            vram_used_mb=used if isinstance(used, int) else None,
+            vram_free_mb=free if isinstance(free, int) else None,
+            worker_alive=worker_alive,
+            new_xid_events=new_xids,
+        )
+        self._gpu_metrics.append(snapshot)
+        self._gpu_metrics = self._gpu_metrics[-1000:]
+        if not worker_alive:
+            return "El worker Qwen terminó durante el monitoreo"
+        if new_xids:
+            return (
+                "Se detectó un Xid nuevo durante la inferencia. No se iniciarán más trabajos; "
+                "reinicia la sesión gráfica o el sistema según su estado y exporta el diagnóstico."
+            )
+        if isinstance(temperature, int) and temperature > self.policy.max_temperature_c:
+            return (
+                f"Temperatura GPU crítica durante inferencia: {temperature} °C "
+                f"> {self.policy.max_temperature_c} °C"
+            )
+        critical_free_mb = max(256, self.policy.min_vram_free_mb // 4)
+        if isinstance(free, int) and free < critical_free_mb:
+            return (
+                f"VRAM libre crítica durante inferencia: {free} MiB "
+                f"< {critical_free_mb} MiB"
+            )
+        if (
+            isinstance(used, int)
+            and isinstance(total, int)
+            and total > 0
+            and (used / total) * 100 >= 95
+        ):
+            return "VRAM usada alcanzó el umbral crítico de 95% durante inferencia"
+        return None
+
+    def _set_gpu_fault(self, reason: str) -> None:
+        self._gpu_fault_reason = reason
+        self._last_error = reason
+        self._state = "gpu_fault"
+        self._terminate_worker("gpu_fault")
+        self._state = "gpu_fault"
+        self._log("gpu_fault", reason=reason)
 
     def _worker_exited(self, worker: WorkerHandle) -> None:
         self._last_worker_exit_code = worker.process.poll()
@@ -677,6 +795,13 @@ class QwenController:
             with self._lock:
                 self._current_job = job
             try:
+                if self._gpu_fault_reason:
+                    raise QwenServiceError(
+                        "gpu_fault",
+                        "Qwen permanece bloqueado después de un fallo GPU: "
+                        + self._gpu_fault_reason,
+                        status=HTTPStatus.SERVICE_UNAVAILABLE,
+                    )
                 job.stage = "preflight"
                 preflight = self.preflight(queued_job=True)
                 if not preflight.allowed:

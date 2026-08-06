@@ -143,6 +143,46 @@ def _runtime_probe_command(runtime_python: Path) -> list[str]:
     return [str(runtime_python), "-c", script]
 
 
+def collect_gpu_metrics(
+    runner: CommandRunner = _run_command,
+) -> dict[str, object]:
+    """Collect one lightweight NVIDIA snapshot without importing Torch."""
+
+    try:
+        result = runner(
+            [
+                "nvidia-smi",
+                f"--query-gpu={GPU_QUERY}",
+                "--format=csv,noheader,nounits",
+            ],
+            8,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"No se pudo sondear nvidia-smi: {type(exc).__name__}") from exc
+    if result.returncode != 0:
+        raise RuntimeError("nvidia-smi no respondió durante el monitoreo")
+    return _parse_gpu_row(result.stdout)
+
+
+def collect_kernel_events(
+    window_seconds: int,
+    runner: CommandRunner = _run_command,
+) -> tuple[str, ...]:
+    """Read filtered recent kernel events at a deliberately low frequency."""
+
+    window_minutes = max(1, (window_seconds + 59) // 60)
+    try:
+        result = runner(
+            ["journalctl", "-k", "--since", f"-{window_minutes} min", "--no-pager"],
+            15,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError(f"No se pudo consultar el journal: {type(exc).__name__}") from exc
+    if result.returncode != 0:
+        raise RuntimeError("journalctl no está disponible durante el monitoreo")
+    return tuple(_filtered_kernel_events(result.stdout))
+
+
 def _scan_gpu_app_processes(proc_root: Path = Path("/proc")) -> tuple[list[str], list[int]]:
     accelerated: set[str] = set()
     qwen_workers: list[int] = []
