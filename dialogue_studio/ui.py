@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import html
+import json
 from collections.abc import Container
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,7 @@ from .pronunciation.import_export import (
 )
 from .pronunciation.ui import render_pronunciation, render_utterance_pronunciation
 from .qwen_client import QwenBackendManager, QwenClient, QwenClientError
+from .qwen_gpu_safety import GpuSafetyPolicy, policy_json
 from .qwen_preview import QwenPreview, clear_qwen_previews, generate_qwen_previews
 from .qwen_service import (
     DEFAULT_GENERATION_OPTIONS,
@@ -74,7 +76,7 @@ from .speechnote import (
     open_speechnote,
     synthesize_text,
 )
-from .storage import ProjectStore
+from .storage import ProjectStore, atomic_write_text
 from .synthesis import (
     GLOBAL_SYNTHESIS_COORDINATOR,
     SynthesisBusyError,
@@ -183,6 +185,7 @@ def system_diagnostics() -> dict[str, object]:
             "supports_language_selection": True,
             "defaults": dict(DEFAULT_GENERATION_OPTIONS),
         },
+        "qwen_preflight": None,
     }
     try:
         data["flatpak"] = check_flatpak()
@@ -198,8 +201,12 @@ def system_diagnostics() -> dict[str, object]:
     try:
         data["qwen"] = qwen.health()
         data["qwen_capabilities"] = qwen.capabilities()
+        data["qwen_preflight"] = qwen.preflight()
     except (QwenClientError, ValueError):
-        pass
+        try:
+            data["qwen_preflight"] = QwenBackendManager(AppPaths.discover()).preflight().to_dict()
+        except (OSError, RuntimeError, ValueError) as exc:
+            data["qwen_preflight_error"] = str(exc)
     return data
 
 
@@ -242,6 +249,7 @@ def _init_state() -> tuple[AppPaths, ProjectStore]:
         st.session_state.qwen_gallery_records = []
         st.session_state.qwen_gallery_options = dict(DEFAULT_GENERATION_OPTIONS)
         st.session_state.speechnote_voice_catalog = {}
+        st.session_state.qwen_session_confirmed = False
     # ``busy`` existed in v0.1 and could survive an interrupted Streamlit run forever.
     # It is not evidence of a real process-local synthesis and is safe to migrate away.
     st.session_state.pop("busy", None)
@@ -254,6 +262,8 @@ def _init_state() -> tuple[AppPaths, ProjectStore]:
         st.session_state.qwen_gallery_options = dict(DEFAULT_GENERATION_OPTIONS)
     if "speechnote_voice_catalog" not in st.session_state:
         st.session_state.speechnote_voice_catalog = {}
+    if "qwen_session_confirmed" not in st.session_state:
+        st.session_state.qwen_session_confirmed = False
     if "global_pronunciation_rules" not in st.session_state:
         loaded_dictionary = GlobalPronunciationStore(paths).load()
         st.session_state.global_pronunciation_rules = list(loaded_dictionary.rules)
@@ -357,7 +367,16 @@ def _project_capabilities(
     )
     qwen_status = diagnostics.get("qwen", {})
     qwen_state = qwen_status.get("state", "offline") if isinstance(qwen_status, dict) else "offline"
-    qwen_available = qwen_state in {"idle", "error"}
+    raw_preflight = diagnostics.get("qwen_preflight")
+    preflight = raw_preflight if isinstance(raw_preflight, dict) else None
+    preflight_allowed = preflight is None or preflight.get("allowed") is True
+    confirmation_required = preflight is not None and preflight_allowed
+    confirmed = bool(st.session_state.get("qwen_session_confirmed"))
+    qwen_available = (
+        qwen_state == "idle"
+        and preflight_allowed
+        and (confirmed or not confirmation_required)
+    )
     playable = [
         _valid_ready_audio(project_dir, utterance) is not None for utterance in project.utterances
     ]
@@ -575,8 +594,8 @@ def _remember_speechnote_voice_catalog(diagnostics: dict[str, object]) -> None:
     st.session_state.speechnote_voice_catalog = catalog
 
 
-def _gib(value: object) -> str:
-    return f"{int(value) / (1024**3):.1f} GiB" if isinstance(value, int) else "—"
+def _mib(value: object) -> str:
+    return f"{int(value)} MiB" if isinstance(value, int) else "—"
 
 
 def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> None:
@@ -584,42 +603,117 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
     status = raw_status if isinstance(raw_status, dict) else {}
     raw_capabilities = diagnostics.get("qwen_capabilities", {})
     qwen_capabilities = raw_capabilities if isinstance(raw_capabilities, dict) else {}
+    raw_preflight = diagnostics.get("qwen_preflight")
+    preflight = raw_preflight if isinstance(raw_preflight, dict) else {}
     state = str(status.get("state", "offline"))
     state_labels = {
         "offline": "Apagado",
         "starting": "Iniciando",
+        "starting_worker": "Iniciando worker",
         "idle": "Disponible",
+        "blocked": "Bloqueado",
+        "gpu_fault": "Fallo GPU",
         "loading_model": "Cargando modelo",
         "generating": "Generando",
+        "validating": "Validando",
         "error": "Error",
     }
-    with st.expander("Backend Qwen3-TTS", expanded=state != "offline"):
-        summary = st.columns(4)
-        summary[0].metric("Estado", state_labels.get(state, state))
-        summary[1].metric("GPU", str(status.get("gpu") or "—"))
-        summary[2].metric("VRAM libre", _gib(status.get("vram_free_bytes")))
-        summary[3].metric("VRAM total", _gib(status.get("vram_total_bytes")))
+    allowed = preflight.get("allowed") is True
+    warnings = preflight.get("warnings", [])
+    blockers = preflight.get("blockers", [])
+    if state in {"gpu_fault", "error"}:
+        safety_label = "Fallo"
+    elif blockers or (preflight and not allowed):
+        safety_label = "Bloqueado"
+    elif warnings:
+        safety_label = "Advertencia"
+    elif allowed:
+        safety_label = "Seguro según preflight"
+    else:
+        safety_label = "Sin comprobar"
+    with st.expander("Seguridad GPU de Qwen", expanded=state != "offline" or bool(blockers)):
+        summary = st.columns(5)
+        summary[0].metric("Seguridad", safety_label)
+        summary[1].metric("Servicio", state_labels.get(state, state))
+        summary[2].metric("GPU", str(preflight.get("gpu_name") or status.get("gpu") or "—"))
+        summary[3].metric(
+            "Temperatura",
+            f"{preflight['temperature_c']} °C"
+            if isinstance(preflight.get("temperature_c"), int)
+            else "—",
+        )
+        summary[4].metric(
+            "Uso GPU",
+            f"{preflight['gpu_util_percent']}%"
+            if isinstance(preflight.get("gpu_util_percent"), int)
+            else "—",
+        )
+        memory = st.columns(4)
+        memory[0].metric("VRAM usada", _mib(preflight.get("vram_used_mb")))
+        memory[1].metric("VRAM libre", _mib(preflight.get("vram_free_mb")))
+        memory[2].metric("VRAM total", _mib(preflight.get("vram_total_mb")))
+        memory[3].metric("Worker PID", str(status.get("worker_pid") or "—"))
         st.caption(
             f"Modelo · {status.get('model', DEFAULT_MODEL)}  |  "
-            f"Torch · {status.get('torch', '—')}  |  CUDA · {status.get('cuda_version', '—')}  |  "
-            f"BF16 · {'sí' if status.get('bf16') else '—'}  |  "
+            f"driver · {preflight.get('driver_version', '—')}  |  "
+            f"Torch · {preflight.get('runtime_torch_version', status.get('torch', '—'))}  |  "
+            f"CUDA · {preflight.get('cuda_version', status.get('cuda_version', '—'))}  |  "
+            f"BF16 · {'sí' if preflight.get('bf16_available', status.get('bf16')) else '—'}  |  "
             f"dtype · {status.get('dtype', 'bfloat16')}  |  "
             f"atención · {status.get('attention', 'sdpa')}  |  salida · 24000 Hz"
+        )
+        queue_state = status.get("queue", [])
+        st.caption(
+            f"Modelo cargado · {'sí' if status.get('model_loaded') else 'no'}  |  "
+            f"inactividad · {float(status.get('idle_seconds', 0)):.1f} s  |  "
+            f"cola · {len(queue_state) if isinstance(queue_state, list) else 0}"
         )
         speakers = qwen_capabilities.get("speakers", FALLBACK_SPEAKERS)
         languages = qwen_capabilities.get("languages", FALLBACK_LANGUAGES)
         st.caption(f"Voces · {len(speakers)}  |  Idiomas · {len(languages)}")
         st.info(
-            "El modelo 0.6B permite elegir voz, idioma y sampling. No admite instrucciones "
-            "emocionales, VoiceDesign ni clonación de voz; esos controles permanecen ocultos."
+            "Qwen utilizará CUDA en una GPU que también maneja pantallas. Esta mitigación reduce "
+            "el riesgo, pero no garantiza que una pantalla nunca se congele. El modelo 0.6B no "
+            "admite instrucciones emocionales, VoiceDesign ni clonación de voz."
         )
+        if blockers:
+            st.error("Generación bloqueada para proteger la sesión gráfica.")
+            for blocker in blockers:
+                st.error(str(blocker))
+        for warning in warnings if isinstance(warnings, (list, tuple)) else []:
+            st.warning(str(warning))
+        actions = preflight.get("recommended_actions", [])
+        for action in actions if isinstance(actions, (list, tuple)) else []:
+            if "code --disable-gpu" in str(action):
+                st.code("code --disable-gpu .", language="bash")
+            else:
+                st.caption(str(action))
+        graphics = preflight.get("graphics_processes", [])
+        compute = preflight.get("compute_processes", [])
+        with st.expander("Procesos y eventos observados"):
+            st.write("Procesos gráficos", graphics or "Ninguno detectado")
+            st.write("Procesos de cómputo", compute or "Ninguno detectado")
+            st.write("Xid recientes", preflight.get("recent_xid_events", []) or "Ninguno")
         if status.get("last_error"):
             st.error(str(status["last_error"]))
-        controls = st.columns(4)
         manager = QwenBackendManager(paths)
+        controls = st.columns(5)
         if controls[0].button(
-            "Iniciar backend Qwen",
-            disabled=state != "offline",
+            "Ejecutar preflight",
+            use_container_width=True,
+        ):
+            try:
+                if state == "offline":
+                    manager.preflight()
+                else:
+                    manager.client.preflight()
+                _clear_diagnostics_cache()
+                st.rerun()
+            except (OSError, ValueError, QwenClientError) as exc:
+                st.error(str(exc))
+        if controls[1].button(
+            "Iniciar Qwen de forma segura",
+            disabled=state != "offline" or not allowed,
             use_container_width=True,
         ):
             try:
@@ -628,11 +722,8 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
                 st.rerun()
             except (OSError, ValueError, QwenClientError) as exc:
                 st.error(str(exc))
-        if controls[1].button("Actualizar estado", use_container_width=True):
-            _clear_diagnostics_cache()
-            st.rerun()
         if controls[2].button(
-            "Descargar modelo de GPU",
+            "Descargar modelo",
             disabled=state == "offline" or not bool(status.get("model_loaded")),
             use_container_width=True,
         ):
@@ -643,7 +734,18 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
             except QwenClientError as exc:
                 st.error(str(exc))
         if controls[3].button(
-            "Detener backend",
+            "Detener worker",
+            disabled=state == "offline" or not bool(status.get("worker_alive")),
+            use_container_width=True,
+        ):
+            try:
+                manager.client.stop_worker()
+                _clear_diagnostics_cache()
+                st.rerun()
+            except QwenClientError as exc:
+                st.error(str(exc))
+        if controls[4].button(
+            "Detener servicio",
             disabled=state == "offline",
             use_container_width=True,
         ):
@@ -653,6 +755,48 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
                 st.rerun()
             except (OSError, QwenClientError) as exc:
                 st.error(str(exc))
+
+        if allowed and not st.session_state.get("qwen_session_confirmed"):
+            st.warning(
+                "Preflight aprobado. Qwen utilizará CUDA en una GPU que también maneja "
+                "pantallas. Cierra aplicaciones gráficas pesadas para reducir el riesgo."
+            )
+            if st.checkbox(
+                "Entiendo el riesgo compartido y habilitar Qwen durante esta sesión",
+                key="qwen-risk-confirmation",
+            ):
+                st.session_state.qwen_session_confirmed = True
+                st.rerun()
+        elif st.session_state.get("qwen_session_confirmed"):
+            st.success("Preflight confirmado para esta sesión segura.")
+
+        active_policy = status.get("policy")
+        if not isinstance(active_policy, dict):
+            try:
+                active_policy = manager.gpu_policy().to_dict()
+            except ValueError:
+                active_policy = GpuSafetyPolicy().to_dict()
+        with st.expander("Política GPU activa y editable"):
+            policy_text = st.text_area(
+                "JSON de política local",
+                json.dumps(active_policy, ensure_ascii=False, indent=2, sort_keys=True),
+                height=320,
+                key="qwen-gpu-policy-json",
+                help="Los valores predeterminados son prudentes para este equipo, no universales.",
+            )
+            if st.button("Guardar política GPU", key="save-qwen-gpu-policy"):
+                try:
+                    decoded = json.loads(policy_text)
+                    if not isinstance(decoded, dict):
+                        raise ValueError("La política debe ser un objeto JSON")
+                    policy = GpuSafetyPolicy.from_mapping(decoded)
+                    paths.ensure()
+                    atomic_write_text(paths.qwen_gpu_policy, policy_json(policy))
+                    st.session_state.qwen_session_confirmed = False
+                    _clear_diagnostics_cache()
+                    st.success("Política GPU guardada; vuelve a ejecutar el preflight.")
+                except (OSError, ValueError, json.JSONDecodeError) as exc:
+                    st.error(str(exc))
 
 
 def _render_recovery(

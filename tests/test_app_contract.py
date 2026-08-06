@@ -762,6 +762,57 @@ def test_qwen_only_project_can_generate_without_speechnote(
     assert calls == ["qwen"]
 
 
+def test_blocked_qwen_keeps_speechnote_editing_and_generation_available(
+    monkeypatch, tmp_path: Path
+) -> None:
+    paths = AppPaths(tmp_path / "Music")
+    diagnostics = _diagnostics(tts_available=True, qwen_available=True)
+    diagnostics["qwen_preflight"] = {
+        "allowed": False,
+        "blockers": ["Se detectaron eventos Xid recientes"],
+        "warnings": [],
+        "recommended_actions": [],
+    }
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: diagnostics)
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    utterance = app.session_state.project.utterances[0]
+    text = _keyed(app.text_area, f"utterance-text-{utterance.utterance_id}")
+    text.set_value("Speech Note sigue disponible").run()
+    assert not _keyed(app.button, f"generate-{utterance.utterance_id}").disabled
+    speaker = app.session_state.project.speakers[0]
+    _keyed(app.selectbox, f"speaker-provider-{speaker.speaker_id}").select("qwen").run()
+    assert _keyed(app.button, f"generate-{utterance.utterance_id}").disabled
+    assert any(
+        "Generación bloqueada para proteger la sesión gráfica" in item.value
+        for item in app.error
+    )
+
+
+def test_safe_qwen_requires_one_session_confirmation(monkeypatch, tmp_path: Path) -> None:
+    paths = AppPaths(tmp_path / "Music")
+    diagnostics = _diagnostics(tts_available=False, qwen_available=True)
+    diagnostics["qwen_preflight"] = {
+        "allowed": True,
+        "gpu_name": "Fake RTX",
+        "warnings": ["La GPU también maneja pantallas"],
+        "blockers": [],
+        "recommended_actions": [],
+    }
+    monkeypatch.setattr(ui.AppPaths, "discover", classmethod(lambda cls: paths))
+    monkeypatch.setattr(ui, "system_diagnostics", lambda: diagnostics)
+    app = AppTest.from_file("app.py", default_timeout=30).run()
+    project = app.session_state.project
+    utterance = project.utterances[0]
+    speaker = project.speakers[0]
+    _keyed(app.selectbox, f"speaker-provider-{speaker.speaker_id}").select("qwen").run()
+    _keyed(app.text_area, f"utterance-text-{utterance.utterance_id}").set_value("Hola").run()
+    assert _keyed(app.button, f"generate-{utterance.utterance_id}").disabled
+    _keyed(app.checkbox, "qwen-risk-confirmation").check().run()
+    assert app.session_state.qwen_session_confirmed is True
+    assert not _keyed(app.button, f"generate-{utterance.utterance_id}").disabled
+
+
 def test_rendering_inherited_qwen_override_does_not_mark_ready_audio_stale(
     monkeypatch, tmp_path: Path
 ) -> None:
