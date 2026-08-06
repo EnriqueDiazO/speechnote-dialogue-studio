@@ -51,15 +51,19 @@ make qwen-stop
 
 1. Abre Speech Note y habilita la invocación externa, o inicia el backend Qwen desde la UI.
 2. Carga el proyecto de ejemplo o crea un proyecto nuevo.
-3. Elige proveedor, voz e idioma por personaje. Una intervención puede tener un override propio.
-4. Pulsa **Generar** en una tarjeta o **Generar pendientes**. Editar el texto, el hablante o su
+3. Usa **Pronunciación** para previsualizar ecuaciones, crear reglas globales o del proyecto y
+   confirmar términos técnicos. El texto escrito nunca se reemplaza por la lectura derivada.
+4. Elige proveedor, voz e idioma por personaje. Una intervención puede tener overrides de voz y
+   de pronunciación propios.
+5. Pulsa **Generar** en una tarjeta o **Generar pendientes**. Speech Note y Qwen reciben el mismo
+   texto hablado efectivo. Editar el texto, el perfil, una regla aplicable, el hablante o su
    voz marca el audio como desactualizado, pero conserva la toma anterior.
-5. En cada tarjeta lista, **Crear WAV** descarga sólo esa intervención. **Crear MP3** prepara la
+6. En cada tarjeta lista, **Crear WAV** descarga sólo esa intervención. **Crear MP3** prepara la
    conversión individual con FFmpeg y muestra su descarga sin volver a sintetizar.
-6. Cuando todas estén listas, pulsa **Construir diálogo**. El master usa PCM de 16 bits,
+7. Cuando todas estén listas, pulsa **Construir diálogo**. El master usa PCM de 16 bits,
    48 kHz, mono, y la pausa configurada entre intervenciones.
-7. Escucha el resultado, descarga WAV, crea el MP3 opcional o exporta el proyecto ZIP portable.
-8. Guarda para reabrir el proyecto desde la barra lateral.
+8. Escucha el resultado, descarga WAV, crea el MP3 opcional o exporta el proyecto ZIP portable.
+9. Guarda para reabrir el proyecto desde la barra lateral.
 
 No cierres Speech Note mientras una voz Piper está trabajando. Las síntesis se ejecutan de forma
 secuencial; nunca se lanzan dos a la vez, incluso al comparar varias voces Qwen.
@@ -82,6 +86,9 @@ La raíz se descubre con `xdg-user-dir MUSIC`, no se asume `~/Music`:
 │   ├── audio/raw/
 │   ├── audio/normalized/
 │   └── exports/
+├── config/
+│   ├── pronunciation-dictionary.json
+│   └── pronunciation-pending-terms.json
 ├── temporary/qwen-previews/
 └── runtime/                  # PID, log y lock de arranque del servicio; nunca del proyecto
 ```
@@ -91,7 +98,8 @@ carpetas de trabajo. La aplicación no borra proyectos ni tomas anteriores autom
 reemplaza de forma segura los JSON del proyecto que el usuario ya abrió o creó.
 
 Consulta [docs/PROJECT_FORMAT.md](docs/PROJECT_FORMAT.md) para el esquema portable y el contenido
-del ZIP.
+del ZIP, y [docs/PRONUNCIATION_DICTIONARY.md](docs/PRONUNCIATION_DICTIONARY.md) para reglas,
+ecuaciones, perfiles, precedencia, importación y solución de problemas.
 
 ## Diagnóstico manual
 
@@ -135,7 +143,8 @@ esté cerrado.
 
 ## Alcance
 
-Incluye edición multi-hablante, dos proveedores combinables, overrides, galería Qwen, persistencia
-JSON, generación/regeneración individual y por lote, reproductores, normalización, WAV maestro,
-MP3 y ZIP. Quedan fuera VoiceDesign, clonación, música, efectos, transcripción, diarización, nube,
-bases de datos, edición de onda, reducción de ruido e IA generadora de guiones.
+Incluye edición multi-hablante, dos proveedores combinables, pronunciación científica y matemática
+en español e inglés, diccionarios extensibles, overrides, galería Qwen, persistencia JSON,
+generación/regeneración individual y por lote, reproductores, normalización, WAV maestro, MP3 y
+ZIP. Quedan fuera LaTeX completo, VoiceDesign, clonación, música, efectos, transcripción,
+diarización, nube, bases de datos, edición de onda, reducción de ruido e IA generadora de guiones.

@@ -258,3 +258,18 @@ def test_profile_override_and_rules_participate_in_fingerprint() -> None:
     profile = audio_input_fingerprint(project, utterance)
 
     assert len({baseline, manual, profile}) == 3
+
+
+def test_documented_spanish_example_dictionary_is_importable() -> None:
+    content = Path("examples/pronunciation_dictionary_es.json").read_text(encoding="utf-8")
+    preview = preview_rule_import(content, format_name="json", scope="global")
+    assert not preview.rejected_rules
+    assert len(preview.valid_rules) == 6
+    assert {rule.pattern for rule in preview.valid_rules} >= {
+        "Qwen",
+        "ReLU",
+        "MSE",
+        "Fredholm",
+        "Haseman",
+        "MOFA2",
+    }

@@ -13,6 +13,9 @@ El objeto raíz contiene:
 - `pause_ms`: entero de 0 a 5000; por defecto 650.
 - `speakers`: uno o más perfiles.
 - `utterances`: intervenciones en orden consecutivo desde 1.
+- `pronunciation_profile`: idioma y políticas de matemáticas, siglas, números, unidades y
+  puntuación.
+- `pronunciation_rules`: sólo reglas creadas o modificadas por el usuario en este proyecto.
 - `created_at`, `updated_at`: marcas ISO 8601.
 
 Cada perfil de hablante contiene `speaker_id`, `name`, `model_id`, `model_label`, `color_key` y
@@ -30,12 +33,16 @@ Un proyecto antiguo sin `tts` se interpreta en memoria como `provider: speechnot
 `model_id` como voz. Abrirlo no reescribe el archivo; los campos nuevos aparecen sólo cuando el
 usuario guarda explícitamente.
 
-Cada intervención contiene `utterance_id`, `order`, `speaker_id`, `text`,
+Cada intervención contiene `utterance_id`, `order`, `speaker_id`, `text` y su alias portable
+`written_text`,
 `audio_relative_path`, `duration_seconds`, `sha256`, `status`, `error_message`, `created_at` y
 `updated_at`. Puede contener `tts_override` y `audio_fingerprint`. El override admite proveedor,
 voz, idioma, opciones de sampling e instrucción futura; sólo se guardan sus diferencias duraderas.
-La huella SHA-256 identifica texto, personaje, proveedor, modelo, voz, idioma, instrucción y
-opciones efectivas. Los estados válidos son `draft`, `generating`, `ready`, `error` y `stale`.
+También puede contener `use_pronunciation_engine`, `manual_spoken_text_override`,
+`utterance_rules`, `spoken_text`, hashes escrito/hablado/de reglas, versión del motor, reglas
+aplicadas y warnings. La huella SHA-256 identifica texto escrito, texto hablado, perfil, reglas,
+override, personaje, proveedor, modelo, voz, idioma, instrucción y opciones efectivas. Los estados
+válidos son `draft`, `generating`, `ready`, `error` y `stale`.
 
 `generating` se admite al leer proyectos antiguos, pero representa exclusivamente un instante de
 ejecución. Al guardar, se serializa como `stale` recuperable; identificadores como `busy`,
@@ -83,7 +90,9 @@ speech-dialogue-project/
 ```
 
 El `project.json` interno remapea los segmentos a `audio/segments/`. `manifest.json` registra el
-formato, versión, proyecto, voces, intervenciones, pausa y la lista de archivos. Cada entrada de
+formato, versión, proyecto, perfil y reglas de pronunciación, voces, intervenciones, pausa y la
+lista de archivos. Los guiones conservan el texto escrito; la metadata conserva también el texto
+hablado derivado. Cada entrada de
 archivo incluye `path`, `role`, `size`, `sha256`, `media_type` y `duration_seconds` cuando aplica.
 El orden y las marcas internas del ZIP son deterministas; no se incluyen modelos de voz ni
 archivos externos al proyecto.
