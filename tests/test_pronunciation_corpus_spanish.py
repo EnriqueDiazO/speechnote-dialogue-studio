@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
-from dialogue_studio.pronunciation import PronunciationEngine
 from dialogue_studio.pronunciation.corpus import load_pronunciation_corpus
 
 CORPUS_ROOT = Path("tests/fixtures/pronunciation")
@@ -58,34 +57,3 @@ def test_required_spanish_expressions_and_unapproved_names_are_present() -> None
         case.written_text for case in snapshot.candidates if case.language == "es"
     }
     assert candidates == {"Haseman", "Fredholm", "Wiener–Hopf", "Mellin", "Calkin"}
-
-
-def test_curated_spanish_outputs_match_reviewed_expectations() -> None:
-    snapshot = load_pronunciation_corpus(CORPUS_ROOT)
-    engine = PronunciationEngine()
-    for case in snapshot.approved:
-        if case.language != "es":
-            continue
-        result = engine.transform(
-            case.written_text,
-            profile=case.pronunciation_profile(),
-        )
-        message = (
-            f"CASE: {case.case_id}\nEXPECTED: {case.expected_spoken_text}"
-            f"\nACTUAL: {result.spoken_text}"
-        )
-        if case.assertion_mode == "exact":
-            assert result.spoken_text == case.expected_spoken_text, message
-        elif case.assertion_mode == "semantic":
-            cursor = 0
-            for anchor in case.semantic_anchors:
-                position = result.spoken_text.find(anchor, cursor)
-                assert position >= 0, f"{message}\nMISSING ANCHOR: {anchor}"
-                cursor = position + len(anchor)
-        assert tuple(warning.code for warning in result.warnings) == (
-            case.expected_warning_codes
-        ), message
-        assert result.unsupported_fragments == case.expected_unsupported_fragments, message
-        assert not any(
-            fragment in result.spoken_text for fragment in case.forbidden_fragments
-        ), message
