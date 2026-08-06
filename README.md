@@ -72,7 +72,8 @@ El modelo Qwen instalado es `Qwen3-TTS-12Hz-0.6B-CustomVoice`. Permite nueve voc
 y controles de sampling. Aunque la API pública acepta `instruct`, la implementación 0.1.1 fuerza
 ese valor a `None` para el tamaño `0b6`; por eso la UI no muestra emoción, estilo ni instrucciones
 como controles activos. Tampoco anuncia VoiceDesign o clonación. Consulta
-[docs/QWEN_TTS_BACKEND.md](docs/QWEN_TTS_BACKEND.md).
+[docs/QWEN_TTS_BACKEND.md](docs/QWEN_TTS_BACKEND.md) y los límites de la GPU compartida en
+[docs/QWEN_GPU_DISPLAY_SAFETY.md](docs/QWEN_GPU_DISPLAY_SAFETY.md).
 
 ## Datos locales
 
@@ -88,7 +89,8 @@ La raíz se descubre con `xdg-user-dir MUSIC`, no se asume `~/Music`:
 │   └── exports/
 ├── config/
 │   ├── pronunciation-dictionary.json
-│   └── pronunciation-pending-terms.json
+│   ├── pronunciation-pending-terms.json
+│   └── qwen-gpu-safety-policy.json
 ├── temporary/qwen-previews/
 └── runtime/                  # PID, log y lock de arranque del servicio; nunca del proyecto
 ```

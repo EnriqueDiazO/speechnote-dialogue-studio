@@ -30,19 +30,25 @@ Streamlit no importa Torch, Torchaudio o `qwen_tts`. `QwenBackendManager` inicia
   -m dialogue_studio.qwen_service
 ```
 
-El proceso escucha sólo en `127.0.0.1:8765`. Expone:
+Ese proceso es un controller que no importa Torch ni Qwen. Escucha sólo en `127.0.0.1:8765`,
+ejecuta un preflight fail-closed y crea como máximo un proceso hijo
+`dialogue_studio.qwen_worker`. Sólo el worker importa Torch, carga el modelo y toca CUDA. Expone:
 
-- `GET /health`: estado, modelo, GPU, VRAM, Torch, CUDA, BF16, dtype y atención.
+- `GET /health`: controller, cola, worker, modelo, política y último preflight.
 - `GET /capabilities`: voces, idiomas y capacidades reales.
-- `POST /synthesize`: una síntesis GPU con salida WAV atómica.
-- `POST /unload`: libera la instancia y ejecuta `torch.cuda.empty_cache()`.
-- `POST /shutdown`: descarga el modelo y detiene el servicio si no está generando.
+- `GET /preflight`: comprobación actual de NVIDIA, CUDA, BF16, sesión y eventos del kernel.
+- `GET /diagnostic`: diagnóstico exportable sin texto, audio ni rutas personales completas.
+- `POST /synthesize`: encola una síntesis estrictamente secuencial con salida WAV atómica.
+- `POST /unload`: descarga el modelo dentro del worker.
+- `POST /worker/stop`: termina el worker y libera toda su VRAM.
+- `POST /cancel`: cancela pendientes y permite terminar el trabajo actual de forma controlada.
+- `POST /shutdown`: detiene controller y worker.
 
-Los estados son `offline`, `starting`, `idle`, `loading_model`, `generating` y `error`. El modelo
-se carga perezosamente una sola vez y se reutiliza. Un lock de proceso admite sólo una generación
-GPU; se libera siempre en `finally`. Un PID bajo la carpeta controlada detecta procesos obsoletos,
-un lock breve serializa el arranque y el propio socket impide duplicar el servicio. PID, locks y
-peticiones activas nunca entran en `project.json`.
+El worker se crea mediante `subprocess` (spawn del sistema operativo), nunca mediante `fork`
+después de inicializar CUDA. El modelo se carga perezosamente y los trabajos esperan en una cola
+única. Los timeouts predeterminados son 30 s para arranque, 180 s para carga y 300 s para
+síntesis. A los 120 s inactivo se descarga el modelo y a los 300 s se termina el worker. PID,
+cola, locks y peticiones activas nunca entran en `project.json`.
 
 La salida se escribe primero como un nombre aleatorio `.partial` dentro de la raíz controlada. Se
 valida RIFF/WAVE y sólo entonces `os.replace` la publica atómicamente. Una salida parcial de un
@@ -64,10 +70,14 @@ QWEN_TTS_ATTN=sdpa
 QWEN_TTS_TIMEOUT=600
 ```
 
-Host remoto, `float16`, otro dispositivo o una atención distinta se rechazan. BF16 se mantiene
+Host remoto, `float16`, otra atención y modelos distintos se rechazan. BF16 se mantiene
 porque fue validado en la GPU instalada y evita los problemas NaN observables con precisión
 inadecuada. La semilla se aplica dentro de `torch.random.fork_rng`, que restaura el estado del RNG
 CPU/CUDA aunque la generación falle.
+
+El modo CPU de emergencia sólo admite `cpu`, `float32` y `sdpa`, exige política y confirmación
+explícitas y nunca sustituye automáticamente un trabajo CUDA fallido. La política y los límites
+de seguridad se documentan en [QWEN_GPU_DISPLAY_SAFETY.md](QWEN_GPU_DISPLAY_SAFETY.md).
 
 Opciones expuestas, todas confirmadas en `_merge_generate_kwargs` y en una síntesis CUDA real:
 
@@ -103,9 +113,9 @@ duración/tiempo y asignar una al personaje. La caché se direcciona por la huel
 voz, idioma y sampling. **Limpiar previews** sólo borra WAV dentro de
 `temporary/qwen-previews/`; no toca proyectos ni tomas definitivas.
 
-El panel permite iniciar, actualizar, descargar de VRAM y detener. Muestra estado, modelo, GPU,
-VRAM libre/total, Torch, CUDA, BF16, dtype, atención, frecuencia nativa, conteos de voces/idiomas y
-el último error.
+El panel permite ejecutar preflight, iniciar de forma segura, descargar el modelo, detener el
+worker, detener el servicio y descargar un diagnóstico. Muestra política, sesión, driver,
+temperatura, uso, VRAM, procesos, Xid, worker, cola, modelo y tiempo inactivo.
 
 ## Audio y diálogos mixtos
 
@@ -129,9 +139,9 @@ make qwen-stop
 
 Los pesos permanecen en la caché normal de Hugging Face; descargar el modelo de VRAM no borra esa
 caché. Si CUDA no está disponible o BF16 no está soportado, el servicio entra en `error` y Speech
-Note sigue editable y operativo. Ante OOM, detén otras cargas, usa **Descargar modelo de GPU** y
-reintenta; no cambies a FP16. El log local está en
-`<Música>/SpeechNote Dialogue Studio/runtime/qwen-tts.log`.
+Note sigue editable y operativo. Ante OOM, detén otras cargas, usa **Descargar modelo** y vuelve a
+ejecutar el preflight; no cambies a FP16. Los logs locales del controller y worker están bajo
+`<Música>/SpeechNote Dialogue Studio/runtime/`.
 
 ## Pruebas
 
