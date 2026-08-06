@@ -1415,8 +1415,19 @@ def _run_generation(
                         current_id,
                         paths.root,
                         output_paths=current_paths,
+                        global_rules=st.session_state.global_pronunciation_rules,
+                        allow_pronunciation_fallback=bool(
+                            st.session_state.get(
+                                f"utterance-pronunciation-fallback-{current_id}",
+                                False,
+                            )
+                        ),
                     ),
                 )
+                if st.session_state.global_pronunciation_rules:
+                    GlobalPronunciationStore(paths).save(
+                        st.session_state.global_pronunciation_rules
+                    )
                 if tts.provider == "speechnote":
                     st.session_state.external_actions_enabled = True
             except SynthesisBusyError:

@@ -28,7 +28,9 @@ from .pronunciation import (
     PronunciationProfile,
     PronunciationResult,
     PronunciationRule,
+    PronunciationWarning,
 )
+from .pronunciation.import_export import record_rule_usage
 from .qwen_client import synthesize_qwen_text
 from .qwen_service import DEFAULT_GENERATION_OPTIONS
 from .speechnote import synthesize_text
@@ -42,6 +44,10 @@ class GenerationPaths:
 
 
 _UNSET = object()
+
+
+class PronunciationTransformationError(RuntimeError):
+    """A recoverable preprocessing failure requiring an explicit written-text fallback."""
 
 
 def update_utterance(
@@ -279,6 +285,7 @@ def audio_input_fingerprint(
     *,
     global_rules: list[PronunciationRule] | tuple[PronunciationRule, ...] = (),
     pronunciation_engine: PronunciationEngine | None = None,
+    pronunciation_result: PronunciationResult | None = None,
 ) -> str:
     speaker = project.speaker(utterance.speaker_id)
     config = effective_tts_config(project, utterance)
@@ -290,7 +297,7 @@ def audio_input_fingerprint(
     generation_options = dict(config.generation_options)
     if config.provider == "qwen":
         generation_options = {**DEFAULT_GENERATION_OPTIONS, **generation_options}
-    pronunciation = effective_pronunciation_result(
+    pronunciation = pronunciation_result or effective_pronunciation_result(
         project,
         utterance,
         global_rules=global_rules,
@@ -411,6 +418,9 @@ def generate_utterance(
     qwen_synthesizer: Callable[..., object] = synthesize_qwen_text,
     normalizer: Callable[..., AudioInfo] = normalize_audio,
     output_paths: GenerationPaths | None = None,
+    global_rules: list[PronunciationRule] | tuple[PronunciationRule, ...] = (),
+    pronunciation_engine: PronunciationEngine | None = None,
+    allow_pronunciation_fallback: bool = False,
 ) -> Utterance:
     utterance = next(item for item in project.utterances if item.utterance_id == utterance_id)
     speaker = project.speaker(utterance.speaker_id)
@@ -419,6 +429,40 @@ def generate_utterance(
         raise ValueError("No se puede sintetizar una intervención vacía")
     if not tts.voice_id.strip():
         raise ValueError(f"{speaker.name} no tiene una voz asignada")
+    try:
+        pronunciation = effective_pronunciation_result(
+            project,
+            utterance,
+            global_rules=global_rules,
+            engine=pronunciation_engine,
+        )
+    except Exception as exc:
+        if not allow_pronunciation_fallback:
+            raise PronunciationTransformationError(
+                "No se pudo transformar la pronunciación. Revisa las reglas o activa "
+                "explícitamente el fallback al texto escrito."
+            ) from exc
+        fallback_profile = replace(project.pronunciation_profile, enabled=False)
+        pronunciation = PronunciationEngine().transform(
+            utterance.text,
+            profile=fallback_profile,
+        )
+        pronunciation = replace(
+            pronunciation,
+            warnings=(
+                *pronunciation.warnings,
+                PronunciationWarning(
+                    code="explicit_written_text_fallback",
+                    message=(
+                        "Falló la transformación y se usó el texto escrito por "
+                        "confirmación explícita."
+                    ),
+                ),
+            ),
+        )
+    effective_text = pronunciation.spoken_text
+    if not effective_text.strip():
+        raise PronunciationTransformationError("El texto hablado resultante está vacío")
     paths = output_paths or prepare_generation_paths(project_dir, utterance, controlled_root)
     previous_state = (
         utterance.status,
@@ -438,7 +482,7 @@ def generate_utterance(
             }
             qwen_synthesizer(
                 tts.voice_id,
-                utterance.text,
+                effective_text,
                 tts.language,
                 generation_options,
                 paths.raw,
@@ -446,7 +490,7 @@ def generate_utterance(
         else:
             synthesizer(
                 tts.voice_id,
-                utterance.text,
+                effective_text,
                 paths.raw,
                 controlled_root,
                 probe=probe_audio,
@@ -476,7 +520,23 @@ def generate_utterance(
     utterance.audio_relative_path = paths.normalized.relative_to(project_dir).as_posix()
     utterance.duration_seconds = info.duration_seconds
     utterance.sha256 = sha256_file(paths.normalized)
-    utterance.audio_fingerprint = audio_input_fingerprint(project, utterance)
+    persist_pronunciation_result(utterance, pronunciation)
+    utterance.audio_fingerprint = audio_input_fingerprint(
+        project,
+        utterance,
+        global_rules=global_rules,
+        pronunciation_engine=pronunciation_engine,
+        pronunciation_result=pronunciation,
+    )
+    applied_ids = {item.rule_id for item in pronunciation.applied_rules}
+    project.pronunciation_rules = list(
+        record_rule_usage(project.pronunciation_rules, applied_ids)
+    )
+    utterance.utterance_rules = list(
+        record_rule_usage(utterance.utterance_rules, applied_ids)
+    )
+    if isinstance(global_rules, list):
+        global_rules[:] = record_rule_usage(global_rules, applied_ids)
     utterance.status = "ready"
     utterance.error_message = None
     utterance.updated_at = utc_now()

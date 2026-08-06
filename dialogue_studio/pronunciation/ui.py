@@ -827,6 +827,12 @@ def render_utterance_pronunciation(
         key=f"utterance-pronunciation-enabled-{utterance.utterance_id}",
         disabled=disabled,
     )
+    st.checkbox(
+        "Si falla la transformación, permitir usar explícitamente el texto escrito",
+        value=False,
+        key=f"utterance-pronunciation-fallback-{utterance.utterance_id}",
+        disabled=disabled,
+    )
     manual_enabled = st.checkbox(
         "Editar pronunciación sólo aquí",
         value=utterance.manual_spoken_text_override is not None,
