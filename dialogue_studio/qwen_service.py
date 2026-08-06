@@ -299,12 +299,12 @@ class QwenController:
             return None
         return int(worker.process.pid)
 
-    def preflight(self) -> GpuPreflightResult:
+    def preflight(self, *, queued_job: bool = False) -> GpuPreflightResult:
         result = self._preflight_runner(
             self.policy,
             Path(sys.executable),
             recognized_worker_pid=self._worker_pid(),
-            synthesis_in_progress=self._current_job is not None,
+            synthesis_in_progress=self._current_job is not None and not queued_job,
             service_state="idle",
         )
         with self._lock:
@@ -678,7 +678,7 @@ class QwenController:
                 self._current_job = job
             try:
                 job.stage = "preflight"
-                preflight = self.preflight()
+                preflight = self.preflight(queued_job=True)
                 if not preflight.allowed:
                     detail = preflight.blockers[0] if preflight.blockers else "estado no seguro"
                     raise QwenServiceError(
