@@ -1,4 +1,4 @@
-.PHONY: install run test lint doctor qwen-status qwen-start qwen-unload qwen-stop \
+.PHONY: install run test lint doctor qwen-runtime qwen-status qwen-start qwen-unload qwen-stop \
 	pronunciation-corpus-validate pronunciation-corpus-stats pronunciation-corpus-test
 
 install:
@@ -26,6 +26,9 @@ pronunciation-corpus-test:
 
 doctor:
 	.venv/bin/python -m dialogue_studio.doctor
+
+qwen-runtime:
+	.venv/bin/python -m dialogue_studio.qwen_client runtime
 
 qwen-status:
 	.venv/bin/python -m dialogue_studio.qwen_client status

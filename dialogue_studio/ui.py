@@ -38,7 +38,7 @@ from .pronunciation.import_export import (
 )
 from .pronunciation.ui import render_pronunciation, render_utterance_pronunciation
 from .qwen_client import QwenBackendManager, QwenClient, QwenClientError
-from .qwen_gpu_safety import GpuSafetyPolicy, policy_json
+from .qwen_gpu_safety import GpuSafetyPolicy, load_gpu_safety_policy, policy_json
 from .qwen_preview import QwenPreview, clear_qwen_previews, generate_qwen_previews
 from .qwen_service import (
     DEFAULT_GENERATION_OPTIONS,
@@ -200,13 +200,16 @@ def system_diagnostics() -> dict[str, object]:
                 data["active"] = get_active_tts_model()
     except (RuntimeError, SpeechNoteError) as exc:
         data["error"] = str(exc)
-    qwen = QwenClient()
     try:
+        qwen = QwenClient()
         data["qwen"] = qwen.health()
         data["qwen_capabilities"] = qwen.capabilities()
         data["qwen_preflight"] = qwen.preflight()
         data["qwen_diagnostic"] = qwen.diagnostic()
-    except (QwenClientError, ValueError):
+    except (QwenClientError, ValueError) as exc:
+        qwen_status = data["qwen"]
+        if isinstance(qwen_status, dict):
+            qwen_status["last_error"] = str(exc)
         try:
             data["qwen_preflight"] = QwenBackendManager(AppPaths.discover()).preflight().to_dict()
         except (OSError, RuntimeError, ValueError) as exc:
@@ -712,11 +715,10 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
             st.write("Xid recientes", preflight.get("recent_xid_events", []) or "Ninguno")
         if status.get("last_error"):
             st.error(str(status["last_error"]))
-        manager = QwenBackendManager(paths)
         active_policy = status.get("policy")
         if not isinstance(active_policy, dict):
             try:
-                active_policy = manager.gpu_policy().to_dict()
+                active_policy = load_gpu_safety_policy(paths.qwen_gpu_policy).to_dict()
             except ValueError:
                 active_policy = GpuSafetyPolicy().to_dict()
         cpu_policy_enabled = active_policy.get("allow_cpu_fallback") is True
@@ -741,6 +743,7 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
             use_container_width=True,
         ):
             try:
+                manager = QwenBackendManager(paths)
                 if state == "offline":
                     manager.preflight()
                 else:
@@ -758,6 +761,7 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
             use_container_width=True,
         ):
             try:
+                manager = QwenBackendManager(paths)
                 manager.start(
                     execution_mode="cpu",
                     confirm_cpu_fallback=True,
@@ -772,6 +776,7 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
             use_container_width=True,
         ):
             try:
+                manager = QwenBackendManager(paths)
                 manager.start()
                 _clear_diagnostics_cache()
                 st.rerun()
@@ -783,6 +788,7 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
             use_container_width=True,
         ):
             try:
+                manager = QwenBackendManager(paths)
                 manager.client.unload()
                 _clear_diagnostics_cache()
                 st.rerun()
@@ -794,6 +800,7 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
             use_container_width=True,
         ):
             try:
+                manager = QwenBackendManager(paths)
                 manager.client.stop_worker()
                 _clear_diagnostics_cache()
                 st.rerun()
@@ -805,6 +812,7 @@ def _render_qwen_backend(paths: AppPaths, diagnostics: dict[str, object]) -> Non
             use_container_width=True,
         ):
             try:
+                manager = QwenBackendManager(paths)
                 manager.stop()
                 _clear_diagnostics_cache()
                 st.rerun()

@@ -23,10 +23,11 @@ permiten incorporar en el futuro un modelo que sí anuncie esa capacidad sin fin
 
 ## Aislamiento y arquitectura
 
-Streamlit no importa Torch, Torchaudio o `qwen_tts`. `QwenBackendManager` inicia otro proceso con:
+Streamlit no importa Torch, Torchaudio o `qwen_tts`. `QwenBackendManager` resuelve el intérprete
+externo e inicia otro proceso con:
 
 ```text
-/home/enriquedo/PersonalProjects/qwen/.venv-qwen/bin/python \
+<ruta-qwen>/.venv-qwen/bin/python \
   -m dialogue_studio.qwen_service
 ```
 
@@ -60,7 +61,7 @@ fallo se conserva para diagnóstico. Los errores HTTP tienen código, mensaje y 
 Variables admitidas y defaults:
 
 ```text
-QWEN_TTS_PYTHON=/home/enriquedo/PersonalProjects/qwen/.venv-qwen/bin/python
+QWEN_TTS_PYTHON=/absolute/path/to/qwen/.venv-qwen/bin/python
 QWEN_TTS_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
 QWEN_TTS_HOST=127.0.0.1
 QWEN_TTS_PORT=8765
@@ -68,6 +69,22 @@ QWEN_TTS_DEVICE=cuda:0
 QWEN_TTS_DTYPE=bfloat16
 QWEN_TTS_ATTN=sdpa
 QWEN_TTS_TIMEOUT=600
+```
+
+`QWEN_TTS_PYTHON` es opcional. La resolución usa, en orden, la variable de entorno, una ruta
+inyectada explícitamente en `QwenClientConfig` y el proyecto hermano
+`../qwen/.venv-qwen/bin/python`, derivado de la ubicación real de este repositorio sin depender
+del usuario ni de su carpeta personal. La ruta seleccionada debe existir, ser un archivo
+ejecutable, ejecutar Python e importar `qwen_tts`. La validación ocurre en un subproceso, no
+sintetiza audio y no carga ni descarga ningún modelo.
+
+El entorno Qwen, la instalación de `qwen-tts`, los pesos y la caché de Hugging Face viven fuera de
+Dialogue Studio. Este repositorio no crea ni administra copias de esos recursos. Para ver la ruta
+efectiva, su origen (`environment`, `configured` o `sibling-discovery`) y el resultado de las
+comprobaciones:
+
+```bash
+make qwen-runtime
 ```
 
 Host remoto, `float16`, otra atención y modelos distintos se rechazan. BF16 se mantiene
@@ -131,6 +148,7 @@ el coordinador en memoria. Reiniciar Streamlit o el backend no reconstruye locks
 ## Operación y diagnóstico
 
 ```bash
+make qwen-runtime
 make qwen-status
 make qwen-start
 make qwen-unload

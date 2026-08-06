@@ -11,8 +11,9 @@ en un servicio local aislado que sólo escucha en `127.0.0.1`.
 - Speech Note instalado como Flatpak y abierto durante la síntesis.
 - En Speech Note: **Ajustes → Permitir aplicaciones externas para invocar acciones**.
 - Al menos una voz TTS descargada en Speech Note.
-- Para Qwen: el entorno separado `/home/enriquedo/PersonalProjects/qwen/.venv-qwen`, CUDA y una
-  GPU compatible con BF16. La aplicación principal no importa Torch ni `qwen_tts`.
+- Para Qwen: un entorno externo a este repositorio con `qwen-tts`, CUDA y una GPU compatible con
+  BF16. De forma predeterminada se descubre `../qwen/.venv-qwen/bin/python` desde la ubicación de
+  este repositorio. La aplicación principal no importa Torch ni `qwen_tts`.
 - `ffmpeg` y `ffprobe`; el WAV funciona sin la exportación MP3, pero la normalización necesita
   ambas herramientas si una voz produce un formato distinto del maestro.
 
@@ -41,11 +42,23 @@ make run       # Streamlit en 127.0.0.1:8510
 make test      # pruebas sin invocar Speech Note real
 make lint      # Ruff
 make doctor    # diagnóstico de Flatpak, Speech Note, voces, FFmpeg y Música
+make qwen-runtime  # muestra y valida la ruta Qwen efectiva y su origen
 make qwen-status
 make qwen-start
 make qwen-unload  # libera el modelo de VRAM sin detener el servicio
 make qwen-stop
 ```
+
+Para seleccionar otra ubicación, exporta antes de ejecutar la aplicación:
+
+```bash
+export QWEN_TTS_PYTHON=/absolute/path/to/qwen/.venv-qwen/bin/python
+```
+
+La variable tiene prioridad sobre la configuración explícita y el descubrimiento del proyecto
+hermano. `.env.example` documenta el valor, pero el entorno Qwen y sus pesos permanecen fuera de
+este repositorio: Dialogue Studio no crea otro entorno, no instala `qwen-tts` y no descarga el
+modelo al validar el runtime.
 
 ## Flujo de trabajo
 

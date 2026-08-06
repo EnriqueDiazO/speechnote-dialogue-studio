@@ -14,8 +14,9 @@ import urllib.error
 import urllib.request
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from .audio import probe_audio
 from .paths import AppPaths
@@ -24,14 +25,158 @@ from .qwen_preflight import run_gpu_preflight
 from .qwen_service import DEFAULT_MODEL
 from .synthesis import SynthesisBusyError
 
-DEFAULT_QWEN_PYTHON = Path("/home/enriquedo/PersonalProjects/qwen/.venv-qwen/bin/python")
-
 
 class QwenClientError(RuntimeError):
     def __init__(self, message: str, *, code: str = "client_error", retryable: bool = False):
         super().__init__(message)
         self.code = code
         self.retryable = retryable
+
+
+QwenPythonSource = Literal["environment", "configured", "sibling-discovery"]
+
+
+@dataclass(frozen=True)
+class QwenPythonResolution:
+    path: Path
+    source: QwenPythonSource
+    diagnostic: str
+
+
+def _probe_qwen_python(
+    path: Path,
+    source: QwenPythonSource,
+    *,
+    runner: Any,
+    timeout: float,
+) -> QwenPythonResolution:
+    if not path.exists():
+        raise QwenClientError(
+            f"No se encontró el runtime Qwen de origen {source}: {path}",
+            code="qwen_runtime_not_found",
+        )
+    if not path.is_file():
+        raise QwenClientError(
+            f"La ruta del runtime Qwen de origen {source} no es un archivo: {path}",
+            code="qwen_runtime_not_file",
+        )
+    if not os.access(path, os.X_OK):
+        raise QwenClientError(
+            f"El Python Qwen de origen {source} no es ejecutable: {path}",
+            code="qwen_runtime_not_executable",
+        )
+
+    probes = (
+        (
+            "python",
+            "import sys; print('qwen-runtime-python-ok')",
+            "qwen-runtime-python-ok",
+        ),
+        (
+            "qwen_tts",
+            "import qwen_tts; print('qwen-tts-import-ok')",
+            "qwen-tts-import-ok",
+        ),
+    )
+    probe_environment = os.environ.copy()
+    probe_environment.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"})
+    for probe_name, script, marker in probes:
+        try:
+            result = runner(
+                [str(path), "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+                env=probe_environment,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise QwenClientError(
+                f"El runtime Qwen agotó el tiempo al validar {probe_name}: {path}",
+                code="qwen_runtime_probe_timeout",
+            ) from exc
+        except OSError as exc:
+            raise QwenClientError(
+                f"No se pudo ejecutar el Python Qwen de origen {source}: {path}: {exc}",
+                code="qwen_runtime_not_python",
+            ) from exc
+        stdout = str(result.stdout or "")
+        if result.returncode == 0 and marker in stdout.splitlines():
+            continue
+        detail = str(result.stderr or result.stdout or f"código {result.returncode}").strip()
+        detail = detail[-500:] if detail else f"código {result.returncode}"
+        if probe_name == "qwen_tts":
+            raise QwenClientError(
+                f"El Python Qwen no puede importar qwen_tts: {path}: {detail}",
+                code="qwen_runtime_missing_qwen_tts",
+            )
+        raise QwenClientError(
+            f"La ruta seleccionada no puede ejecutar Python correctamente: {path}: {detail}",
+            code="qwen_runtime_not_python",
+        )
+    return QwenPythonResolution(
+        path=path,
+        source=source,
+        diagnostic=f"Runtime Qwen válido ({source}); Python y qwen_tts comprobados sin síntesis.",
+    )
+
+
+@lru_cache(maxsize=16)
+def _probe_qwen_python_cached(
+    path: Path,
+    source: QwenPythonSource,
+    timeout: float,
+    _file_signature: tuple[int, int, int],
+) -> QwenPythonResolution:
+    return _probe_qwen_python(path, source, runner=subprocess.run, timeout=timeout)
+
+
+def resolve_qwen_python(
+    configured_python: str | Path | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    repository_root: Path | None = None,
+    runner: Any | None = None,
+    timeout: float = 30,
+) -> QwenPythonResolution:
+    """Resolve and validate the external Qwen interpreter without loading a model."""
+    values = os.environ if env is None else env
+    if "QWEN_TTS_PYTHON" in values:
+        raw_path = values["QWEN_TTS_PYTHON"].strip()
+        if not raw_path:
+            raise QwenClientError(
+                "QWEN_TTS_PYTHON está definida pero vacía",
+                code="qwen_runtime_not_found",
+            )
+        candidate = Path(os.path.abspath(Path(raw_path).expanduser()))
+        source: QwenPythonSource = "environment"
+    elif configured_python is not None:
+        raw_path = str(configured_python).strip()
+        if not raw_path:
+            raise QwenClientError(
+                "La ruta Python Qwen configurada está vacía",
+                code="qwen_runtime_not_found",
+            )
+        candidate = Path(os.path.abspath(Path(raw_path).expanduser()))
+        source = "configured"
+    else:
+        repository = (
+            repository_root.resolve(strict=False)
+            if repository_root is not None
+            else Path(__file__).resolve().parents[1]
+        )
+        candidate = Path(
+            os.path.abspath(repository.parent / "qwen" / ".venv-qwen" / "bin" / "python")
+        )
+        source = "sibling-discovery"
+    if runner is not None:
+        return _probe_qwen_python(candidate, source, runner=runner, timeout=timeout)
+    try:
+        metadata = candidate.stat()
+    except OSError:
+        return _probe_qwen_python(candidate, source, runner=subprocess.run, timeout=timeout)
+    signature = (metadata.st_mode, metadata.st_size, metadata.st_mtime_ns)
+    return _probe_qwen_python_cached(candidate, source, timeout, signature)
 
 
 @dataclass(frozen=True)
@@ -44,10 +189,18 @@ class QwenClientConfig:
     dtype: str
     attention: str
     timeout: float
+    python_source: QwenPythonSource = "configured"
+    python_diagnostic: str = "Runtime Qwen proporcionado mediante configuración explícita."
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> QwenClientConfig:
+    def from_env(
+        cls,
+        env: Mapping[str, str] | None = None,
+        *,
+        configured_python: str | Path | None = None,
+    ) -> QwenClientConfig:
         values = os.environ if env is None else env
+        runtime = resolve_qwen_python(configured_python, env=values)
         host = values.get("QWEN_TTS_HOST", "127.0.0.1")
         if host not in {"127.0.0.1", "localhost"}:
             raise ValueError("QWEN_TTS_HOST debe ser local")
@@ -60,7 +213,7 @@ class QwenClientConfig:
         if device != "cuda:0" or dtype != "bfloat16" or attention != "sdpa":
             raise ValueError("Esta integración requiere cuda:0, bfloat16 y sdpa")
         return cls(
-            python=Path(values.get("QWEN_TTS_PYTHON", str(DEFAULT_QWEN_PYTHON))).expanduser(),
+            python=runtime.path,
             model=values.get("QWEN_TTS_MODEL", DEFAULT_MODEL),
             host="127.0.0.1",
             port=port,
@@ -68,6 +221,8 @@ class QwenClientConfig:
             dtype=dtype,
             attention=attention,
             timeout=float(values.get("QWEN_TTS_TIMEOUT", "600")),
+            python_source=runtime.source,
+            python_diagnostic=runtime.diagnostic,
         )
 
     @property
@@ -401,17 +556,41 @@ class QwenBackendManager:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Control del backend local Qwen3-TTS")
-    parser.add_argument("command", choices=("status", "start", "unload", "stop"))
+    parser.add_argument("command", choices=("runtime", "status", "start", "unload", "stop"))
     arguments = parser.parse_args()
-    manager = QwenBackendManager(AppPaths.discover())
-    if arguments.command == "start":
-        result = manager.start()
-    elif arguments.command == "unload":
-        result = manager.client.unload()
-    elif arguments.command == "stop":
-        result = manager.stop()
-    else:
-        result = manager.status()
+    try:
+        config = QwenClientConfig.from_env()
+        if arguments.command == "runtime":
+            result = {
+                "ok": True,
+                "path": str(config.python),
+                "source": config.python_source,
+                "diagnostic": config.python_diagnostic,
+            }
+        else:
+            manager = QwenBackendManager(AppPaths.discover(), config)
+            if arguments.command == "start":
+                result = manager.start()
+            elif arguments.command == "unload":
+                result = manager.client.unload()
+            elif arguments.command == "stop":
+                result = manager.stop()
+            else:
+                result = manager.status()
+    except (OSError, ValueError, QwenClientError) as exc:
+        print(
+            json.dumps(
+                {
+                    "ok": False,
+                    "error": str(exc),
+                    "code": getattr(exc, "code", "configuration_error"),
+                },
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        raise SystemExit(1) from exc
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
 
 
